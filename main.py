@@ -4,6 +4,7 @@ import io
 import json
 import os
 import re
+import secrets
 import time
 import uuid
 from pathlib import Path
@@ -15,8 +16,8 @@ except ImportError:
     pass
 
 import openai
-from fastapi import FastAPI, File, HTTPException, UploadFile
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from openai import OpenAI
 from PIL import Image, ImageChops, ImageStat
@@ -30,11 +31,15 @@ HEARTBEAT_SECONDS = 45      # always re-check at least this often, even if nothi
 MAX_FRAME_BYTES = 3_000_000
 VALID_STATES = {"ok", "watch", "alert", "unsure"}
 LANGUAGES = {"en": "English", "sw": "Swahili"}
+ACCESS_CODE = os.getenv("MPISHI_ACCESS_CODE", "")
+MAX_CALLS_PER_SESSION = int(os.getenv("MPISHI_MAX_CALLS", "400"))
+SESSION_TTL_SECONDS = 4 * 3600
 
 SYSTEM_PROMPT = """You are Mpishi, a kitchen watcher. You see two photos from a fixed camera over a stove: PREVIOUS (older) and CURRENT.
 The cook is making: {food}. Reply in {language}.
+{goal_line}
 Reply with ONLY a JSON object, no other text:
-{{"state": "ok" | "watch" | "alert" | "unsure", "say": "<text>", "timer_seconds": <integer or null>}}
+{{"state": "ok" | "watch" | "alert" | "unsure", "say": "<text>", "timer_seconds": <integer or null>, "goal_met": true | false}}
 Rules:
 - "say" is at most two short sentences: what you see, then one action. Use "" if nothing noteworthy changed.
 - Describe only what is visible: colour, bubbling, smoke, steam, boiling over, bursting, items moving or missing.
@@ -42,6 +47,7 @@ Rules:
 - "alert" only for smoke, flames outside the burner, boil-over, burning, or hot oil with no food that is smoking.
 - If something looks unusual (for example possible packaging), say what you see and ask the cook to check. Do not order the cook to throw food away.
 - Set timer_seconds only if the cook asked for a timer or you advise a specific extra cooking time; otherwise null.
+- If the goal is met, "say" must say so in one short sentence.
 - If you cannot tell, use "unsure"."""
 
 ASK_PROMPT = """You are Mpishi, a kitchen watcher. You see one CURRENT photo from a camera over a stove.
@@ -66,7 +72,8 @@ def get_client() -> OpenAI:
 
 
 class StartRequest(BaseModel):
-    food: str = Field(min_length=2, max_length=200)
+    food: str = Field(default="", max_length=200)
+    goal: str = Field(default="", max_length=200)
     language: str = "en"
 
 
@@ -76,7 +83,7 @@ class AskRequest(BaseModel):
 
 def parse_reply(text) -> dict:
     """Turn the model's text into a safe result. Never raises."""
-    unsure = {"state": "unsure", "say": "", "timer_seconds": None}
+    unsure = {"state": "unsure", "say": "", "timer_seconds": None, "goal_met": False}
     if not text:
         return unsure
     match = re.search(r"\{.*\}", text, re.S)
@@ -91,7 +98,7 @@ def parse_reply(text) -> dict:
     timer = data.get("timer_seconds")
     if isinstance(timer, bool) or not isinstance(timer, int) or not 1 <= timer <= 7200:
         timer = None
-    return {"state": state, "say": say.strip()[:300], "timer_seconds": timer}
+    return {"state": state, "say": say.strip()[:300], "timer_seconds": timer, "goal_met": data.get("goal_met") is True}
 
 
 def frame_changed(prev: bytes, cur: bytes) -> float:
@@ -133,16 +140,30 @@ def get_session(sid: str) -> dict:
     return s
 
 
+@app.middleware("http")
+async def check_access(request: Request, call_next):
+    path = request.url.path
+    if ACCESS_CODE and path.startswith("/api/") and path != "/api/health":
+        supplied = request.headers.get("x-access-code", "")
+        if not secrets.compare_digest(supplied.encode(), ACCESS_CODE.encode()):
+            return JSONResponse({"detail": "Wrong or missing access code."}, status_code=401)
+    return await call_next(request)
+
+
 @app.get("/api/health")
 def health():
-    return {"ok": True, "model": MODEL}
+    return {"ok": True, "model": MODEL, "protected": bool(ACCESS_CODE)}
 
 
 @app.post("/api/session")
 def start(req: StartRequest):
+    now = time.time()
+    for old in [k for k, v in SESSIONS.items() if now - v["created"] > SESSION_TTL_SECONDS]:
+        SESSIONS.pop(old, None)
     sid = uuid.uuid4().hex[:12]
-    SESSIONS[sid] = {"food": req.food.strip(), "language": LANGUAGES.get(req.language, "English"),
-                     "prev": None, "last": None, "last_call": 0.0}
+    SESSIONS[sid] = {"food": req.food.strip() or "whatever is in the pan (say what you see)",
+                     "goal": req.goal.strip(), "language": LANGUAGES.get(req.language, "English"),
+                     "prev": None, "last": None, "last_call": 0.0, "calls": 0, "created": now}
     return {"session_id": sid}
 
 
@@ -161,7 +182,12 @@ async def frame(sid: str, file: UploadFile = File(...)):
     diff = frame_changed(prev, data)
     if diff < CHANGE_THRESHOLD and now - s["last_call"] < HEARTBEAT_SECONDS:
         return {"status": "unchanged", "state": "ok", "say": "", "timer_seconds": None, "diff": round(diff, 1)}
-    prompt = SYSTEM_PROMPT.format(food=s["food"], language=s["language"])
+    s["calls"] += 1
+    if s["calls"] > MAX_CALLS_PER_SESSION:
+        raise HTTPException(429, "Session limit reached. Stop and start again.")
+    goal_line = (f'The cook wants to be told when: {s["goal"]}. Set "goal_met" to true only when the photos clearly show this.'
+                 if s["goal"] else 'There is no goal. Always set "goal_met" to false.')
+    prompt = SYSTEM_PROMPT.format(food=s["food"], language=s["language"], goal_line=goal_line)
     try:
         result = call_model(prompt, [prev, data])
     except HTTPException:

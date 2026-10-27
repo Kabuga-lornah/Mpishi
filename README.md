@@ -15,3 +15,8 @@ so for a phone use an https tunnel to port 8000 (for example `cloudflared tunnel
 
 ## Test
 `pytest`
+
+## Deploy (Render)
+Build: `pip install -r requirements.txt`  Start: `uvicorn main:app --host 0.0.0.0 --port $PORT`
+Environment: `MODEL_API_KEY` (required), `MPISHI_ACCESS_CODE` (set this so strangers cannot spend your credits).
+Free instances sleep after 15 idle minutes; open the link a minute before cooking.

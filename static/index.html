@@ -4,6 +4,9 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Mpishi</title>
+<link rel="manifest" href="/static/manifest.webmanifest">
+<meta name="theme-color" content="#2a2118">
+<link rel="apple-touch-icon" href="/static/icon-192.png">
 <style>
 :root{--bg:#f3efe6;--ink:#2a2118;--muted:#6b5f52;--ok:#2f6b3f;--watch:#9a5b00;--alert:#b3261e;--line:#d8cfbf}
 *{box-sizing:border-box}
@@ -14,6 +17,7 @@ p.sub{color:var(--muted);margin:.2rem 0 1.2rem}
 label{display:block;font-weight:bold;margin:.8rem 0 .3rem}
 input,select,button{font:inherit;padding:.7rem .9rem;border:2px solid var(--ink);border-radius:6px;background:#fff;color:var(--ink);width:100%}
 button{background:var(--ink);color:#fff;cursor:pointer;margin-top:.8rem}
+#start{font-size:1.5rem;padding:1.2rem}
 button.secondary{background:#fff;color:var(--ink)}
 button:focus-visible,input:focus-visible,select:focus-visible{outline:3px solid #1a5fb4;outline-offset:2px}
 .row{display:flex;gap:10px}.row>*{flex:1}
@@ -35,8 +39,12 @@ video{width:100%;border-radius:8px;background:#000;margin-top:1rem;max-height:46
 <p class="sub">An extra set of eyes on your stove. Not a smoke alarm. Never leave hot oil alone.</p>
 
 <section id="setup">
-  <label for="food">What are you cooking?</label>
-  <input id="food" placeholder="e.g. potato fries in oil, then pre-cooked smokies" maxlength="200">
+  <label for="code">Access code</label>
+  <input id="code" type="password" autocomplete="off" placeholder="Access code">
+  <label for="food">What are you cooking? (optional)</label>
+  <input id="food" placeholder="e.g. potato fries in oil" maxlength="200">
+  <label for="goal">Tell me when... (optional)</label>
+  <input id="goal" placeholder="e.g. the fries are golden" maxlength="200">
   <label for="lang">Mpishi speaks</label>
   <select id="lang"><option value="en">English</option><option value="sw">Kiswahili</option></select>
   <button id="start">Start watching</button>
@@ -58,7 +66,7 @@ video{width:100%;border-radius:8px;background:#000;margin-top:1rem;max-height:46
 
 <script>
 const INTERVAL_MS = 10000, MAX_FAILS = 3, REPEAT_MS = 60000;
-let sid = null, stream = null, loop = null, wake = null, fails = 0, busy = false;
+let sid = null, stream = null, loop = null, wake = null, fails = 0, busy = false, code = "", cfg = {}, goalDone = false;
 let timerEnd = null, timerTick = null, lastSaid = "", lastSaidAt = 0, lang = "en";
 const $ = id => document.getElementById(id);
 
@@ -94,10 +102,14 @@ function startTimer(sec) {
     if (!left) { clearInterval(timerTick); const m = lang === "sw" ? "Muda umekwisha. Angalia chakula." : "Timer done. Check the food."; show("watch", m); speak(m); log(m); }
   }, 500);
 }
-async function api(path, opts) {
+async function api(path, opts = {}) {
+  opts.headers = Object.assign({}, opts.headers, code ? { "X-Access-Code": code } : {});
   const res = await fetch(path, opts);
-  if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || res.status);
+  if (!res.ok) { const err = new Error((await res.json().catch(() => ({}))).detail || res.status); err.status = res.status; throw err; }
   return res.json();
+}
+async function newSession() {
+  sid = (await api("/api/session", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(cfg) })).session_id;
 }
 function grabFrame() {
   const v = $("cam"); if (!v.videoWidth) return null;
@@ -114,9 +126,14 @@ async function tick() {
     const r = await api(`/api/session/${sid}/frame`, { method: "POST", body: fd });
     fails = 0;
     if (r.status === "analysed" || r.status === "baseline") { if (!r.say && r.state === "ok") show("ok", "Watching. All quiet.", "Last check " + new Date().toLocaleTimeString()); }
-    announce(r);
+    if (r.goal_met && !goalDone) {
+      goalDone = true;
+      const g = r.say || (lang === "sw" ? "Lengo limefikiwa. Angalia chakula." : "Your goal is met. Check the food.");
+      show("watch", g); speak(g); log(g);
+    } else announce(r);
     if (r.timer_seconds) startTimer(r.timer_seconds);
   } catch (e) {
+    if (e.status === 404) { try { await newSession(); } catch (_) {} return; }   // server restarted: quietly start a fresh session
     fails++;
     if (fails >= MAX_FAILS) {
       const m = lang === "sw" ? "Nimepoteza muunganisho. Tafadhali angalia jiko mwenyewe." : "I lost my connection. Please watch the stove yourself.";
@@ -125,20 +142,21 @@ async function tick() {
   } finally { busy = false; }
 }
 $("start").onclick = async () => {
-  const food = $("food").value.trim(); lang = $("lang").value;
-  if (food.length < 2) { $("food").focus(); return; }
-  if (!window.isSecureContext) { $("secure").classList.remove("hidden"); return; }
+  cfg = { food: $("food").value.trim(), goal: $("goal").value.trim(), language: $("lang").value };
+  lang = cfg.language; code = $("code").value.trim(); goalDone = false;
+  try { localStorage.setItem("mpishi_code", code); } catch (_) {}
+  speak(lang === "sw" ? "Mpishi anaangalia. Elekeza kamera kwenye sufuria." : "Mpishi is watching. Point the camera at the pan.");  // inside the tap, so audio is allowed
+  const warn = t => { $("secure").textContent = t; $("secure").classList.remove("hidden"); };
+  if (!window.isSecureContext) { warn("The camera needs a secure page. Open this app on localhost, or through an https link."); return; }
   try {
     stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" }, audio: false });
-  } catch (e) { $("secure").textContent = "Camera blocked: " + e.name + ". Allow camera access and try again."; $("secure").classList.remove("hidden"); return; }
-  try {
-    sid = (await api("/api/session", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ food, language: lang }) })).session_id;
-  } catch (e) { $("secure").textContent = "Could not start: " + e.message; $("secure").classList.remove("hidden"); stream.getTracks().forEach(t => t.stop()); return; }
+  } catch (e) { warn("Camera blocked: " + e.name + ". Allow camera access and try again."); return; }
+  try { await newSession(); }
+  catch (e) { warn(e.status === 401 ? "Wrong access code." : "Could not start: " + e.message); stream.getTracks().forEach(t => t.stop()); return; }
   $("cam").srcObject = stream; await $("cam").play();
   $("setup").classList.add("hidden"); $("live").classList.remove("hidden");
-  show("ok", "Starting…"); fails = 0;
+  show("ok", "Starting..."); fails = 0;
   try { wake = await navigator.wakeLock?.request("screen"); } catch (_) {}
-  speak(lang === "sw" ? "Mpishi anaangalia jiko." : "Mpishi is watching.");
   setTimeout(tick, 1500); loop = setInterval(tick, INTERVAL_MS);
 };
 $("ask").onclick = async () => {
@@ -151,9 +169,10 @@ $("q").addEventListener("keydown", e => { if (e.key === "Enter") $("ask").click(
 $("stop").onclick = async () => {
   clearInterval(loop); clearInterval(timerTick); speechSynthesis?.cancel();
   stream?.getTracks().forEach(t => t.stop()); try { await wake?.release(); } catch (_) {}
-  if (sid) fetch(`/api/session/${sid}`, { method: "DELETE" }); sid = null;
+  if (sid) api(`/api/session/${sid}`, { method: "DELETE" }).catch(() => {}); sid = null;
   $("live").classList.add("hidden"); $("setup").classList.remove("hidden"); $("timer").textContent = "";
 };
+try { code = localStorage.getItem("mpishi_code") || ""; $("code").value = code; } catch (_) {}
 </script>
 </body>
 </html>
