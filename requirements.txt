@@ -1,0 +1,7 @@
+fastapi>=0.110
+uvicorn>=0.29
+openai>=1.40
+pillow>=10.0
+python-multipart>=0.0.9
+python-dotenv>=1.0
+pytest>=8.0

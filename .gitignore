@@ -1,0 +1,10 @@
+.env
+__pycache__/
+.pytest_cache/
+
+.venv/
+.agents/
+.eden/
+.hg/
+.muse/
+.sl/

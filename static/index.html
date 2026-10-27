@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mpishi</title>
+<style>
+:root{--bg:#f3efe6;--ink:#2a2118;--muted:#6b5f52;--ok:#2f6b3f;--watch:#9a5b00;--alert:#b3261e;--line:#d8cfbf}
+*{box-sizing:border-box}
+body{margin:0;font-family:Georgia,"Iowan Old Style",serif;background:var(--bg);color:var(--ink);line-height:1.5}
+main{max-width:640px;margin:0 auto;padding:20px}
+h1{font-size:2.2rem;margin:0}
+p.sub{color:var(--muted);margin:.2rem 0 1.2rem}
+label{display:block;font-weight:bold;margin:.8rem 0 .3rem}
+input,select,button{font:inherit;padding:.7rem .9rem;border:2px solid var(--ink);border-radius:6px;background:#fff;color:var(--ink);width:100%}
+button{background:var(--ink);color:#fff;cursor:pointer;margin-top:.8rem}
+button.secondary{background:#fff;color:var(--ink)}
+button:focus-visible,input:focus-visible,select:focus-visible{outline:3px solid #1a5fb4;outline-offset:2px}
+.row{display:flex;gap:10px}.row>*{flex:1}
+video{width:100%;border-radius:8px;background:#000;margin-top:1rem;max-height:46vh;object-fit:cover}
+#status{margin-top:1rem;padding:1rem;border-radius:8px;border:3px solid var(--ok);font-size:1.6rem;font-weight:bold;min-height:5.5rem}
+#status.watch{border-color:var(--watch);color:var(--watch)}
+#status.alert{border-color:var(--alert);color:#fff;background:var(--alert)}
+#status small{display:block;font-size:.95rem;font-weight:normal;margin-top:.4rem}
+#timer{font-size:1.3rem;margin-top:.6rem}
+#log{list-style:none;padding:0;margin:1rem 0 0;color:var(--muted);font-size:.95rem}
+#log li{padding:.3rem 0;border-top:1px solid var(--line)}
+.warn{background:#fff3cd;border:2px solid var(--watch);padding:.7rem;border-radius:6px;margin-top:1rem}
+.hidden{display:none}
+</style>
+</head>
+<body>
+<main>
+<h1>Mpishi</h1>
+<p class="sub">An extra set of eyes on your stove. Not a smoke alarm. Never leave hot oil alone.</p>
+
+<section id="setup">
+  <label for="food">What are you cooking?</label>
+  <input id="food" placeholder="e.g. potato fries in oil, then pre-cooked smokies" maxlength="200">
+  <label for="lang">Mpishi speaks</label>
+  <select id="lang"><option value="en">English</option><option value="sw">Kiswahili</option></select>
+  <button id="start">Start watching</button>
+  <div id="secure" class="warn hidden">The camera needs a secure page. Open this app on localhost, or through an https link on your phone.</div>
+</section>
+
+<section id="live" class="hidden">
+  <video id="cam" playsinline muted></video>
+  <div id="status" role="status" aria-live="assertive">Starting…</div>
+  <div id="timer"></div>
+  <div class="row">
+    <input id="q" placeholder="Ask: is it ready yet?" aria-label="Ask Mpishi">
+    <button id="ask" class="secondary">Ask</button>
+  </div>
+  <button id="stop" class="secondary">Stop</button>
+  <ul id="log"></ul>
+</section>
+</main>
+
+<script>
+const INTERVAL_MS = 10000, MAX_FAILS = 3, REPEAT_MS = 60000;
+let sid = null, stream = null, loop = null, wake = null, fails = 0, busy = false;
+let timerEnd = null, timerTick = null, lastSaid = "", lastSaidAt = 0, lang = "en";
+const $ = id => document.getElementById(id);
+
+function speak(text) {
+  if (!text || !window.speechSynthesis) return;
+  const u = new SpeechSynthesisUtterance(text);
+  u.lang = lang === "sw" ? "sw-KE" : "en-KE";   // device falls back if the voice is missing
+  speechSynthesis.cancel(); speechSynthesis.speak(u);
+}
+function show(state, text, note) {
+  const el = $("status");
+  el.className = state === "alert" ? "alert" : state === "watch" ? "watch" : "";
+  el.textContent = text;
+  if (note) { const s = document.createElement("small"); s.textContent = note; el.appendChild(s); }
+}
+function log(text) {
+  const li = document.createElement("li");
+  li.textContent = new Date().toLocaleTimeString() + "  " + text;
+  $("log").prepend(li);
+}
+function announce(r) {
+  if (!r.say) return;
+  const now = Date.now(), repeat = r.say === lastSaid && now - lastSaidAt < REPEAT_MS;
+  show(r.state, r.say);
+  log(r.say);
+  if (!repeat || r.state === "alert") { speak(r.say); lastSaid = r.say; lastSaidAt = now; }
+}
+function startTimer(sec) {
+  clearInterval(timerTick); timerEnd = Date.now() + sec * 1000;
+  timerTick = setInterval(() => {
+    const left = Math.max(0, Math.round((timerEnd - Date.now()) / 1000));
+    $("timer").textContent = left ? `Timer: ${Math.floor(left / 60)}:${String(left % 60).padStart(2, "0")}` : "Timer done";
+    if (!left) { clearInterval(timerTick); const m = lang === "sw" ? "Muda umekwisha. Angalia chakula." : "Timer done. Check the food."; show("watch", m); speak(m); log(m); }
+  }, 500);
+}
+async function api(path, opts) {
+  const res = await fetch(path, opts);
+  if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || res.status);
+  return res.json();
+}
+function grabFrame() {
+  const v = $("cam"); if (!v.videoWidth) return null;
+  const c = document.createElement("canvas"), w = 640;
+  c.width = w; c.height = Math.round(w * v.videoHeight / v.videoWidth);
+  c.getContext("2d").drawImage(v, 0, 0, c.width, c.height);
+  return new Promise(res => c.toBlob(res, "image/jpeg", 0.7));
+}
+async function tick() {
+  if (busy || !sid) return; busy = true;
+  try {
+    const blob = await grabFrame(); if (!blob) return;
+    const fd = new FormData(); fd.append("file", blob, "f.jpg");
+    const r = await api(`/api/session/${sid}/frame`, { method: "POST", body: fd });
+    fails = 0;
+    if (r.status === "analysed" || r.status === "baseline") { if (!r.say && r.state === "ok") show("ok", "Watching. All quiet.", "Last check " + new Date().toLocaleTimeString()); }
+    announce(r);
+    if (r.timer_seconds) startTimer(r.timer_seconds);
+  } catch (e) {
+    fails++;
+    if (fails >= MAX_FAILS) {
+      const m = lang === "sw" ? "Nimepoteza muunganisho. Tafadhali angalia jiko mwenyewe." : "I lost my connection. Please watch the stove yourself.";
+      show("alert", m, String(e.message)); if (fails === MAX_FAILS) speak(m); log("Connection problem: " + e.message);
+    }
+  } finally { busy = false; }
+}
+$("start").onclick = async () => {
+  const food = $("food").value.trim(); lang = $("lang").value;
+  if (food.length < 2) { $("food").focus(); return; }
+  if (!window.isSecureContext) { $("secure").classList.remove("hidden"); return; }
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" }, audio: false });
+  } catch (e) { $("secure").textContent = "Camera blocked: " + e.name + ". Allow camera access and try again."; $("secure").classList.remove("hidden"); return; }
+  try {
+    sid = (await api("/api/session", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ food, language: lang }) })).session_id;
+  } catch (e) { $("secure").textContent = "Could not start: " + e.message; $("secure").classList.remove("hidden"); stream.getTracks().forEach(t => t.stop()); return; }
+  $("cam").srcObject = stream; await $("cam").play();
+  $("setup").classList.add("hidden"); $("live").classList.remove("hidden");
+  show("ok", "Starting…"); fails = 0;
+  try { wake = await navigator.wakeLock?.request("screen"); } catch (_) {}
+  speak(lang === "sw" ? "Mpishi anaangalia jiko." : "Mpishi is watching.");
+  setTimeout(tick, 1500); loop = setInterval(tick, INTERVAL_MS);
+};
+$("ask").onclick = async () => {
+  const q = $("q").value.trim(); if (!q || !sid) return;
+  try { const r = await api(`/api/session/${sid}/ask`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ question: q }) });
+    r.say = r.say || (lang === "sw" ? "Sina uhakika. Angalia mwenyewe." : "I am not sure. Please check by hand."); announce(r); if (r.timer_seconds) startTimer(r.timer_seconds); $("q").value = "";
+  } catch (e) { show("watch", "Could not answer.", String(e.message)); }
+};
+$("q").addEventListener("keydown", e => { if (e.key === "Enter") $("ask").click(); });
+$("stop").onclick = async () => {
+  clearInterval(loop); clearInterval(timerTick); speechSynthesis?.cancel();
+  stream?.getTracks().forEach(t => t.stop()); try { await wake?.release(); } catch (_) {}
+  if (sid) fetch(`/api/session/${sid}`, { method: "DELETE" }); sid = null;
+  $("live").classList.add("hidden"); $("setup").classList.remove("hidden"); $("timer").textContent = "";
+};
+</script>
+</body>
+</html>
