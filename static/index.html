@@ -113,8 +113,8 @@ async function newSession() {
 }
 function grabFrame() {
   const v = $("cam"); if (!v.videoWidth) return null;
-  const c = document.createElement("canvas"), w = 640;
-  c.width = w; c.height = Math.round(w * v.videoHeight / v.videoWidth);
+  const c = document.createElement("canvas"), s = 512 / Math.max(v.videoWidth, v.videoHeight);
+  c.width = Math.round(v.videoWidth * s); c.height = Math.round(v.videoHeight * s);   // longest side 512px, any orientation
   c.getContext("2d").drawImage(v, 0, 0, c.width, c.height);
   return new Promise(res => c.toBlob(res, "image/jpeg", 0.7));
 }

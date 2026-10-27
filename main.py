@@ -2,6 +2,7 @@
 import base64
 import io
 import json
+import logging
 import os
 import re
 import secrets
@@ -17,6 +18,7 @@ except ImportError:
 
 import openai
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from openai import OpenAI
@@ -38,6 +40,7 @@ SESSION_TTL_SECONDS = 4 * 3600
 SYSTEM_PROMPT = """You are Mpishi, a kitchen watcher. You see two photos from a fixed camera over a stove: PREVIOUS (older) and CURRENT.
 The cook is making: {food}. Reply in {language}.
 {goal_line}
+{last_say_line}
 Reply with ONLY a JSON object, no other text:
 {{"state": "ok" | "watch" | "alert" | "unsure", "say": "<text>", "timer_seconds": <integer or null>, "goal_met": true | false}}
 Rules:
@@ -48,6 +51,8 @@ Rules:
 - If something looks unusual (for example possible packaging), say what you see and ask the cook to check. Do not order the cook to throw food away.
 - Set timer_seconds only if the cook asked for a timer or you advise a specific extra cooking time; otherwise null.
 - If the goal is met, "say" must say so in one short sentence.
+- Do not repeat your previous message. If nothing has changed since then, set "say" to "".
+- If no pan, pot, cooking appliance or food is visible, say once, in one short sentence, that you cannot see the pan. If your previous message already said that, set "say" to "" and state to "unsure".
 - If you cannot tell, use "unsure"."""
 
 ASK_PROMPT = """You are Mpishi, a kitchen watcher. You see one CURRENT photo from a camera over a stove.
@@ -56,6 +61,7 @@ The cook asks: "{question}"
 Reply with ONLY a JSON object: {{"state": "ok" | "watch" | "alert" | "unsure", "say": "<at most two short sentences>", "timer_seconds": <integer or null>}}
 Describe only what is visible. Never claim texture or inside temperature. If unsure, say so and suggest checking by hand."""
 
+log = logging.getLogger("uvicorn.error")
 app = FastAPI(title="Mpishi")
 SESSIONS: dict = {}
 _client = None
@@ -64,7 +70,7 @@ _client = None
 def get_client() -> OpenAI:
     global _client
     if _client is None:
-        key = os.getenv("MODEL_API_KEY")
+        key = (os.getenv("MODEL_API_KEY") or "").strip().strip("\"'")
         if not key:
             raise HTTPException(500, "MODEL_API_KEY is not set. Copy .env.example to .env and add your key.")
         _client = OpenAI(base_url=BASE_URL, api_key=key, timeout=40)
@@ -113,15 +119,40 @@ def to_data_url(jpeg: bytes) -> dict:
     return {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}
 
 
+def shrink_jpeg(data: bytes, max_side: int = 768, quality: int = 75) -> bytes:
+    """Re-encode a JPEG so its longest side is at most max_side (keeps phone portrait frames small)."""
+    img = Image.open(io.BytesIO(data)).convert("RGB")
+    img.thumbnail((max_side, max_side))
+    out = io.BytesIO()
+    img.save(out, "JPEG", quality=quality)
+    return out.getvalue()
+
+
+def describe(jpegs: list) -> list:
+    out = []
+    for b in jpegs:
+        try:
+            out.append(f"{Image.open(io.BytesIO(b)).size}/{len(b) // 1024}KB")
+        except Exception:
+            out.append("unreadable")
+    return out
+
+
 def call_model(prompt: str, images: list) -> dict:
-    content = [{"type": "text", "text": prompt}] + [to_data_url(i) for i in images]
+    shrunk = [shrink_jpeg(i) for i in images]
+    content = [{"type": "text", "text": prompt}] + [to_data_url(i) for i in shrunk]
     kwargs = dict(model=MODEL, messages=[{"role": "user", "content": content}],
                   temperature=0.2, max_tokens=2000)
     client = get_client()
     try:
-        resp = client.chat.completions.create(reasoning_effort=REASONING, **kwargs)
-    except (openai.BadRequestError, TypeError):
-        resp = client.chat.completions.create(**kwargs)  # reasoning_effort not accepted
+        try:
+            resp = client.chat.completions.create(reasoning_effort=REASONING, **kwargs)
+        except (openai.BadRequestError, TypeError):
+            resp = client.chat.completions.create(**kwargs)  # reasoning_effort not accepted
+    except Exception as e:
+        log.error("Meta call failed: %s status=%s images=%s detail=%s", type(e).__name__,
+                  getattr(e, "status_code", None), describe(shrunk), str(e)[:400])
+        raise
     return parse_reply(resp.choices[0].message.content)
 
 
@@ -152,7 +183,24 @@ async def check_access(request: Request, call_next):
 
 @app.get("/api/health")
 def health():
-    return {"ok": True, "model": MODEL, "protected": bool(ACCESS_CODE)}
+    return {"ok": True, "model": MODEL, "protected": bool(ACCESS_CODE), "key_set": bool(os.getenv("MODEL_API_KEY"))}
+
+
+@app.get("/api/selftest")
+def selftest():
+    """Ask Meta a tiny question from this server and report the exact error class (needs the access code header)."""
+    kwargs = dict(model=MODEL, messages=[{"role": "user", "content": "Reply with the single word ok."}], max_tokens=300)
+    try:
+        client = get_client()
+        try:
+            r = client.chat.completions.create(reasoning_effort=REASONING, **kwargs)
+        except (openai.BadRequestError, TypeError):
+            r = client.chat.completions.create(**kwargs)
+        return {"ok": True, "reply": (r.choices[0].message.content or "")[:40]}
+    except HTTPException:
+        raise
+    except Exception as e:
+        return {"ok": False, "error": type(e).__name__, "status": getattr(e, "status_code", None)}
 
 
 @app.post("/api/session")
@@ -163,7 +211,7 @@ def start(req: StartRequest):
     sid = uuid.uuid4().hex[:12]
     SESSIONS[sid] = {"food": req.food.strip() or "whatever is in the pan (say what you see)",
                      "goal": req.goal.strip(), "language": LANGUAGES.get(req.language, "English"),
-                     "prev": None, "last": None, "last_call": 0.0, "calls": 0, "created": now}
+                     "prev": None, "last": None, "last_call": 0.0, "calls": 0, "created": now, "last_say": ""}
     return {"session_id": sid}
 
 
@@ -187,13 +235,17 @@ async def frame(sid: str, file: UploadFile = File(...)):
         raise HTTPException(429, "Session limit reached. Stop and start again.")
     goal_line = (f'The cook wants to be told when: {s["goal"]}. Set "goal_met" to true only when the photos clearly show this.'
                  if s["goal"] else 'There is no goal. Always set "goal_met" to false.')
-    prompt = SYSTEM_PROMPT.format(food=s["food"], language=s["language"], goal_line=goal_line)
+    last = s["last_say"].replace('"', "'")
+    last_say_line = f'Your previous message to the cook was: "{last}".' if last else "You have not said anything yet."
+    prompt = SYSTEM_PROMPT.format(food=s["food"], language=s["language"], goal_line=goal_line, last_say_line=last_say_line)
     try:
-        result = call_model(prompt, [prev, data])
+        result = await run_in_threadpool(call_model, prompt, [prev, data])
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(502, f"Model call failed: {type(e).__name__}")
+        raise HTTPException(502, f"Model call failed: {type(e).__name__} {getattr(e, 'status_code', '')}".strip())
+    if result["say"]:
+        s["last_say"] = result["say"]
     s["prev"], s["last_call"] = prev, now
     return {"status": "analysed", "diff": round(diff, 1), **result}
 
@@ -209,7 +261,7 @@ def ask(sid: str, req: AskRequest):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(502, f"Model call failed: {type(e).__name__}")
+        raise HTTPException(502, f"Model call failed: {type(e).__name__} {getattr(e, 'status_code', '')}".strip())
 
 
 @app.delete("/api/session/{sid}")
