@@ -30,6 +30,7 @@ video{width:100%;border-radius:8px;background:#000;margin-top:1rem;max-height:46
 #log{list-style:none;padding:0;margin:1rem 0 0;color:var(--muted);font-size:.95rem}
 #log li{padding:.3rem 0;border-top:1px solid var(--line)}
 .warn{background:#fff3cd;border:2px solid var(--watch);padding:.7rem;border-radius:6px;margin-top:1rem}
+#planbox{margin-top:.8rem;font-size:.95rem;color:var(--muted)}#plan{padding-left:1.1rem;margin:.3rem 0}
 .hidden{display:none}
 </style>
 </head>
@@ -45,6 +46,8 @@ video{width:100%;border-radius:8px;background:#000;margin-top:1rem;max-height:46
   <input id="food" placeholder="e.g. potato fries in oil" maxlength="200">
   <label for="goal">Tell me when... (optional)</label>
   <input id="goal" placeholder="e.g. the fries are golden" maxlength="200">
+  <label for="pref">How do you like it? (optional)</label>
+  <input id="pref" placeholder="e.g. steak medium, stew very tender" maxlength="200">
   <label for="lang">Mpishi speaks</label>
   <select id="lang"><option value="en">English</option><option value="sw">Kiswahili</option></select>
   <button id="start">Start watching</button>
@@ -55,6 +58,11 @@ video{width:100%;border-radius:8px;background:#000;margin-top:1rem;max-height:46
   <video id="cam" playsinline muted></video>
   <div id="status" role="status" aria-live="assertive">Starting…</div>
   <div id="timer"></div>
+  <div id="planbox" class="hidden"><strong>Guide (estimates, check by hand)</strong><ul id="plan"></ul></div>
+  <div class="row">
+    <input id="itemname" placeholder="Add another item, e.g. cabbage steamed" maxlength="200" aria-label="Add item">
+    <button id="additem" class="secondary">Add</button>
+  </div>
   <div class="row">
     <input id="q" placeholder="Ask: is it ready yet?" aria-label="Ask Mpishi">
     <button id="ask" class="secondary">Ask</button>
@@ -67,6 +75,7 @@ video{width:100%;border-radius:8px;background:#000;margin-top:1rem;max-height:46
 <script>
 const INTERVAL_MS = 10000, MAX_FAILS = 3, REPEAT_MS = 60000;
 let sid = null, stream = null, loop = null, wake = null, fails = 0, busy = false, code = "", cfg = {}, goalDone = false;
+let items = [];
 let timerEnd = null, timerTick = null, lastSaid = "", lastSaidAt = 0, lang = "en";
 const $ = id => document.getElementById(id);
 
@@ -109,7 +118,19 @@ async function api(path, opts = {}) {
   return res.json();
 }
 async function newSession() {
-  sid = (await api("/api/session", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(cfg) })).session_id;
+  const r = await api("/api/session", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(cfg) });
+  sid = r.session_id; items = r.items || []; renderPlan(); return r;
+}
+function renderPlan() {
+  const ul = $("plan"); ul.innerHTML = "";
+  items.forEach(it => {
+    const head = document.createElement("li");
+    head.textContent = it.name + (it.source === "web" ? " (from web search)" : it.source === "memory" ? " (from the model's own knowledge, not searched)" : " (no guide)");
+    head.style.fontWeight = "bold"; ul.appendChild(head);
+    if (it.intro) { const li = document.createElement("li"); li.textContent = it.intro; ul.appendChild(li); }
+    (it.checkpoints || []).forEach(c => { const li = document.createElement("li"); li.textContent = `after ${c.at_minutes} min: ${c.say}`; ul.appendChild(li); });
+  });
+  $("planbox").classList.toggle("hidden", !items.length);
 }
 function grabFrame() {
   const v = $("cam"); if (!v.videoWidth) return null;
@@ -132,6 +153,12 @@ async function tick() {
       show("watch", g); speak(g); log(g);
     } else announce(r);
     if (r.timer_seconds) startTimer(r.timer_seconds);
+    const notes = r.notices || [];
+    if (notes.length) {
+      notes.forEach(n => log(n.say));
+      const top = notes.find(n => n.state === "alert") || notes[notes.length - 1];
+      show(top.state, top.say); speak(top.say);
+    }
   } catch (e) {
     if (e.status === 404) { try { await newSession(); } catch (_) {} return; }   // server restarted: quietly start a fresh session
     fails++;
@@ -142,7 +169,7 @@ async function tick() {
   } finally { busy = false; }
 }
 $("start").onclick = async () => {
-  cfg = { food: $("food").value.trim(), goal: $("goal").value.trim(), language: $("lang").value };
+  cfg = { food: $("food").value.trim(), goal: $("goal").value.trim(), preference: $("pref").value.trim(), language: $("lang").value };
   lang = cfg.language; code = $("code").value.trim(); goalDone = false;
   try { localStorage.setItem("mpishi_code", code); } catch (_) {}
   speak(lang === "sw" ? "Mpishi anaangalia. Elekeza kamera kwenye sufuria." : "Mpishi is watching. Point the camera at the pan.");  // inside the tap, so audio is allowed
@@ -151,11 +178,15 @@ $("start").onclick = async () => {
   try {
     stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" }, audio: false });
   } catch (e) { warn("Camera blocked: " + e.name + ". Allow camera access and try again."); return; }
+  $("start").disabled = true; $("start").textContent = "Planning your cook...";
   try { await newSession(); }
   catch (e) { warn(e.status === 401 ? "Wrong access code." : "Could not start: " + e.message); stream.getTracks().forEach(t => t.stop()); return; }
+  finally { $("start").disabled = false; $("start").textContent = "Start watching"; }
   $("cam").srcObject = stream; await $("cam").play();
   $("setup").classList.add("hidden"); $("live").classList.remove("hidden");
-  show("ok", "Starting..."); fails = 0;
+  fails = 0;
+  const intro = (items[0] || {}).intro;
+  if (intro) { show("ok", intro); speak(intro); log(intro); } else show("ok", "Starting...");
   try { wake = await navigator.wakeLock?.request("screen"); } catch (_) {}
   setTimeout(tick, 1500); loop = setInterval(tick, INTERVAL_MS);
 };
@@ -166,11 +197,23 @@ $("ask").onclick = async () => {
   } catch (e) { show("watch", "Could not answer.", String(e.message)); }
 };
 $("q").addEventListener("keydown", e => { if (e.key === "Enter") $("ask").click(); });
+$("additem").onclick = async () => {
+  const name = $("itemname").value.trim(); if (name.length < 2 || !sid) return;
+  $("additem").disabled = true; $("additem").textContent = "Planning...";
+  try {
+    const it = await api(`/api/session/${sid}/items`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name, preference: "" }) });
+    items.push(it); renderPlan(); $("itemname").value = "";
+    if (it.intro) { show("ok", it.name + ": " + it.intro); speak(it.intro); log(it.name + ": " + it.intro); }
+  } catch (e) { show("watch", "Could not add that item.", String(e.message)); }
+  finally { $("additem").disabled = false; $("additem").textContent = "Add"; }
+};
+$("itemname").addEventListener("keydown", e => { if (e.key === "Enter") $("additem").click(); });
 $("stop").onclick = async () => {
   clearInterval(loop); clearInterval(timerTick); speechSynthesis?.cancel();
   stream?.getTracks().forEach(t => t.stop()); try { await wake?.release(); } catch (_) {}
   if (sid) api(`/api/session/${sid}`, { method: "DELETE" }).catch(() => {}); sid = null;
   $("live").classList.add("hidden"); $("setup").classList.remove("hidden"); $("timer").textContent = "";
+  items = []; renderPlan();
 };
 try { code = localStorage.getItem("mpishi_code") || ""; $("code").value = code; } catch (_) {}
 </script>
