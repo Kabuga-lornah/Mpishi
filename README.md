@@ -1,22 +1,35 @@
 # Mpishi
 
-An extra set of eyes on your stove. A phone camera watches the pan, Meta's Muse Spark describes what changed,
-and Mpishi speaks up on its own (English or Kiswahili). It sets timers and answers "is it ready yet?".
-Not a smoke alarm. Never leave hot oil unattended.
+An extra set of eyes on your stove. A camera watches the cooking area, Meta's Muse Spark reads what it sees as
+structured facts (is a pan visible, is a person near, is a burner lit), and Mpishi speaks up only when the cook
+needs to know something. English and Kiswahili. Not a smoke alarm and not a replacement for watching hot oil.
 
-## Run
+## What it does
+- **Silent by default.** It does not narrate the cook. It speaks for safety conditions, cooking checkpoints and questions.
+- **Stove left on.** If a burner looks lit and nobody is near, it reminds the cook at 5, 10, 20 and 30 minutes.
+- **Cooking guide per item.** Muse Wonder with web search plans each dish (estimates only); items have separate clocks.
+- **Demo mode.** A checkbox compresses the timers (default 20x: 15, 30, 60 and 90 seconds) and shows a "Demo mode" badge.
+- **Honest failure.** If the camera or connection stops, a red "MPISHI IS NOT WATCHING" banner appears.
+
+## Run (Windows PowerShell)
 ```
-pip install -r requirements.txt
-cp .env.example .env        # add your Meta Model API key
-uvicorn main:app --host 0.0.0.0 --port 8000
+python -m venv .venv
+.venv\Scripts\python -m pip install -r requirements.txt
+copy .env.example .env      # then put your Meta Model API key in .env
+.venv\Scripts\python -m uvicorn main:app --port 8000
 ```
-Open http://localhost:8000 on a laptop with a webcam. Browsers only allow the camera on localhost or https,
-so for a phone use an https tunnel to port 8000 (for example `cloudflared tunnel --url http://localhost:8000`).
+Open http://localhost:8000. Browsers only allow the camera on localhost or https. For a phone, use an https tunnel to
+port 8000 (for example `cloudflared tunnel --url http://localhost:8000`) and set `MPISHI_ACCESS_CODE` first.
+
+## Access code
+Leave `MPISHI_ACCESS_CODE` empty for local use. If it is set, every API call needs it and the page shows an access-code box.
+Set it before sharing a tunnel or deploying, so strangers cannot spend your credits.
 
 ## Test
-`pytest`
+`.venv\Scripts\python -m pytest -q`
 
-## Deploy (Render)
-Build: `pip install -r requirements.txt`  Start: `uvicorn main:app --host 0.0.0.0 --port $PORT`
-Environment: `MODEL_API_KEY` (required), `MPISHI_ACCESS_CODE` (set this so strangers cannot spend your credits).
-Free instances sleep after 15 idle minutes; open the link a minute before cooking.
+## Known limits
+- A camera cannot see inside food, read oil temperature, or reliably see every flame or smoke. Mpishi says so and asks the cook to check.
+- Cooking times are web-sourced estimates for a home stove. Always check by hand or with a thermometer.
+- Sessions live in memory and are lost when the server restarts. Free hosting sleeps when idle, so demo locally.
+- The Kiswahili text has not been reviewed by a native speaker.

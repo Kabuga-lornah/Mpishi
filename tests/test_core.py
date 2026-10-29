@@ -2,7 +2,8 @@ import io
 from types import SimpleNamespace
 from PIL import Image
 import main as app_main
-from main import parse_reply, parse_plan, frame_changed, due_messages, _output_text, make_plan
+from main import (parse_reply, parse_plan, frame_changed, due_messages, _output_text, make_plan,
+                  MESSAGES, UNATTENDED_STEPS, SYSTEM_PROMPT, PLAN_PROMPT)
 
 
 def jpeg(color):
@@ -15,8 +16,11 @@ def item(name, points, started=0.0):
     return {"name": name, "started": started, "plan_idx": 0, "intro": "", "checkpoints": list(points), "source": "web"}
 
 
-def sess(items=(), facts=None):
-    return {"items": list(items), "facts": facts or {}, "away_since": None, "away_level": 0, "language": "English"}
+def sess(items=(), facts=None, speed=1.0, lang="en"):
+    return {"items": list(items), "facts": facts or {}, "away_since": None, "away_level": 0,
+            "language": "Kiswahili" if lang == "sw" else "English", "language_code": lang, "speed": speed}
+
+AWAY = {"burner_lit": True, "person_present": False, "pan_visible": True}
 
 
 def test_parse_good():
@@ -67,16 +71,51 @@ def test_items_have_independent_clocks():
     assert due_messages(s, 2000) == []
 
 
+def test_real_mode_stove_timers_are_minutes_not_seconds():
+    assert [secs for secs, _ in UNATTENDED_STEPS] == [300, 600, 1200, 1800]
+
+
 def test_unattended_stove_reminders_escalate_and_reset():
-    s = sess(facts={"burner_lit": True, "person_present": False, "pan_visible": True})
+    s = sess(facts=dict(AWAY))
     assert due_messages(s, 100) == []
+    assert due_messages(s, 100 + 200) == []                        # 3 minutes away: still quiet
     first = due_messages(s, 100 + 301)
-    assert len(first) == 1 and "5 minutes" in first[0]["say"] and first[0]["state"] == "watch"
+    assert len(first) == 1 and first[0]["state"] == "watch" and first[0]["say"] == MESSAGES["en"]["away_300"]
     assert due_messages(s, 100 + 400) == []
-    assert "10 minutes" in due_messages(s, 100 + 601)[0]["say"]
+    assert due_messages(s, 100 + 601)[0]["say"] == MESSAGES["en"]["away_600"]
     assert due_messages(s, 100 + 1201)[0]["state"] == "alert"
     s["facts"]["person_present"] = True
     assert due_messages(s, 100 + 1300) == [] and s["away_level"] == 0
+
+
+def test_demo_mode_compresses_time_but_keeps_the_same_logic():
+    s = sess(facts=dict(AWAY), speed=20.0)                         # 300/20 = 15 s, 600/20 = 30 s
+    assert due_messages(s, 100) == [] and due_messages(s, 110) == []
+    assert [m["say"] for m in due_messages(s, 116)] == [MESSAGES["en"]["away_300"]]
+    assert due_messages(s, 131)[0]["say"] == MESSAGES["en"]["away_600"]
+
+
+def test_demo_mode_also_compresses_cooking_checkpoints():
+    s = sess([item("eggs", [{"at_minutes": 10, "say": "Lower the heat"}])], speed=20.0)
+    assert due_messages(s, 29) == [] and [m["say"] for m in due_messages(s, 31)] == ["eggs: Lower the heat"]
+
+
+def test_kiswahili_alerts_use_the_kiswahili_messages():
+    s = sess(facts=dict(AWAY), lang="sw")
+    due_messages(s, 100)
+    assert due_messages(s, 100 + 301)[0]["say"] == MESSAGES["sw"]["away_300"]
+
+
+def test_every_stove_step_has_a_message_in_both_languages():
+    for secs, _ in UNATTENDED_STEPS:
+        assert f"away_{secs}" in MESSAGES["en"] and f"away_{secs}" in MESSAGES["sw"]
+
+
+def test_prompts_format_without_errors_and_keep_the_key_rules():
+    p = SYSTEM_PROMPT.format(food="fries", language="English", goal_line="g", last_say_line="l")
+    assert "NEVER narrate" in p and '"goal_met"' in p
+    q = PLAN_PROMPT.format(food="eggs", pref="soft", language="English")
+    assert "do not spoil" in q or "not spoil the food" in q and "never what is inside the food" in q
 
 
 def test_no_unattended_reminder_when_pan_not_visible_or_burner_unknown():
