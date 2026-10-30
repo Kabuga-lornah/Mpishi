@@ -5,6 +5,9 @@ The cook does NOT have to tell Mpishi when they leave the kitchen; unattended de
 """
 import base64
 import io
+import asyncio
+import contextvars
+import difflib
 import json
 import logging
 import os
@@ -21,13 +24,18 @@ except ImportError:
     pass
 
 import openai
-from fastapi import FastAPI, File, HTTPException, Request, UploadFile
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile, WebSocket
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from openai import OpenAI
 from PIL import Image, ImageChops, ImageStat
 from pydantic import BaseModel, Field
+
+try:
+    import websockets
+except ImportError:  # voice input needs: pip install websockets
+    websockets = None
 
 BASE_URL = os.getenv("META_BASE_URL", "https://api.meta.ai/v1")
 MODEL = os.getenv("MPISHI_MODEL", "muse-spark-1.3")
@@ -56,6 +64,13 @@ QUIET = {
     "burner_lit": None,
 }
 
+VOICE_URL = os.getenv("MPISHI_VOICE_URL", "wss://api.meta.ai/v1/asr/realtime")
+VOICE_MODEL = "muse-voice-transcribe-1.0"
+VOICE_MAX_SECONDS = 20
+VOICE_USD_PER_HOUR = 0.18
+# USD per million tokens (input, output), from the Models page. Cached-input discounts are ignored, so costs are an upper bound.
+PRICES = {"muse-spark-1.3": (1.25, 4.25), "muse-spark-1.2": (1.25, 4.25), "muse-spark-1.1": (1.25, 4.25), "muse-wonder-1.0": (4.0, 20.0)}
+USAGE = contextvars.ContextVar("usage", default=None)
 log = logging.getLogger("uvicorn.error")
 app = FastAPI(title="Mpishi")
 SESSIONS: dict[str, dict] = {}
@@ -104,13 +119,16 @@ The cook is making: {food}. Reply in {language}.
 Question: "{question}"
 Reply ONLY with JSON:
 {{"state":"ok"|"watch"|"alert"|"unsure","say":"<at most two short sentences>","timer_seconds":<integer or null>}}
-Only describe what is visible. Never claim internal temperature or internal doneness. If unsure, say so.
+For questions about what is in the pan, use the photo. For general cooking questions, answer briefly from general knowledge and call it an estimate. Never claim internal temperature or internal doneness. If unsure, say so and suggest checking by hand.
 """
 
 # User-facing messages are centralized so English/Kiswahili can be changed consistently.
 MESSAGES = {
     "en": {
         "no_pan": "I cannot see the pan clearly. Please check the camera view.",
+        "quiet": "Okay. I will stay quiet and keep watching.",
+        "voice_fail": "I could not hear that. Tap the microphone to try again.",
+        "timer_set": "Timer set for {m}.",
         "away_300": "The stove appears unattended. Please check the kitchen.",
         "away_600": "The stove is still on and nobody appears to be near it. Please check the stove.",
         "away_1200": "Please check the stove now. It appears to have been unattended for a while.",
@@ -151,6 +169,9 @@ MESSAGES = {
     },
     "sw": {
         "no_pan": "Siwezi kuona sufuria vizuri. Tafadhali angalia mwonekano wa kamera.",
+        "quiet": "Sawa. Nitakaa kimya na kuendelea kuangalia.",
+        "voice_fail": "Sikusikia vizuri. Bonyeza kipaza sauti ujaribu tena.",
+        "timer_set": "Kipima muda kimewekwa: {m}.",
         "away_300": "Inaonekana jiko halina mtu anayelichunga. Tafadhali angalia jikoni.",
         "away_600": "Jiko bado linawaka na hakuna mtu anayeonekana kuwa karibu. Tafadhali angalia jiko.",
         "away_1200": "Tafadhali angalia jiko sasa. Inaonekana limeachwa bila mtu kwa muda.",
@@ -194,6 +215,29 @@ MESSAGES = {
 
 def t(lang_code: str, key: str) -> str:
     return MESSAGES.get(lang_code, MESSAGES["en"]).get(key, MESSAGES["en"].get(key, key))
+
+
+def new_usage() -> dict:
+    return {"calls": 0, "tokens_in": 0, "tokens_out": 0, "usd": 0.0, "voice_s": 0.0}
+
+
+def _add_usage(resp, model: str) -> None:
+    """Record tokens and cost of one model call against the session that triggered it."""
+    u, usage = USAGE.get(), getattr(resp, "usage", None)
+    if u is None or usage is None:
+        return
+    tin = getattr(usage, "input_tokens", None) or getattr(usage, "prompt_tokens", None) or 0
+    tout = getattr(usage, "output_tokens", None) or getattr(usage, "completion_tokens", None) or 0
+    p_in, p_out = PRICES.get(model, PRICES["muse-spark-1.3"])
+    u["calls"] += 1
+    u["tokens_in"] += tin
+    u["tokens_out"] += tout
+    u["usd"] += (tin * p_in + tout * p_out) / 1_000_000
+
+
+def usage_view(u: dict) -> dict:
+    return {"calls": u["calls"], "tokens_in": u["tokens_in"], "tokens_out": u["tokens_out"],
+            "voice_s": round(u["voice_s"], 1), "usd": round(u["usd"] + u["voice_s"] / 3600 * VOICE_USD_PER_HOUR, 4)}
 
 
 def get_client() -> OpenAI:
@@ -315,6 +359,7 @@ def _chat(content, shrunk=(), model=None):
     except Exception as e:
         log.error("Meta call failed: %s status=%s images=%s detail=%s", type(e).__name__, getattr(e, "status_code", None), describe(list(shrunk)), str(e)[:400])
         raise
+    _add_usage(resp, model or MODEL)
     return resp.choices[0].message.content or ""
 
 
@@ -346,6 +391,7 @@ def _grounded_text(prompt: str) -> str:
         reasoning={"effort": PLAN_REASONING},
         tools=[{"type": "web_search", "search_context_size": "medium"}],
     )
+    _add_usage(resp, PLAN_MODEL)
     return _output_text(resp)
 
 
@@ -439,7 +485,7 @@ async def check_access(request: Request, call_next):
 
 @app.get("/api/health")
 def health():
-    return {"ok": True, "model": MODEL, "protected": bool(ACCESS_CODE), "key_set": bool(os.getenv("MODEL_API_KEY"))}
+    return {"ok": True, "model": MODEL, "protected": bool(ACCESS_CODE), "voice": websockets is not None, "key_set": bool(os.getenv("MODEL_API_KEY"))}
 
 
 @app.get("/api/selftest")
@@ -476,6 +522,8 @@ def start(req: StartRequest):
     now = time.time()
     for old in [k for k, v in SESSIONS.items() if now - v["created"] > SESSION_TTL_SECONDS]:
         SESSIONS.pop(old, None)
+    usage = new_usage()
+    USAGE.set(usage)
     lang_code = req.language if req.language in LANGUAGES else "en"
     language = LANGUAGES[lang_code]
     items = [new_item(req.food.strip(), req.preference.strip(), language, now)] if req.food.strip() else []
@@ -497,6 +545,7 @@ def start(req: StartRequest):
         "away_level": 0,
         "no_pan": 0,
         "speed": DEMO_SPEED if req.demo else 1.0,
+        "usage": usage,
     }
     return {"session_id": sid, "items": [public(i) for i in items], "language": lang_code}
 
@@ -504,6 +553,7 @@ def start(req: StartRequest):
 @app.post("/api/session/{sid}/items")
 def add_item(sid: str, req: ItemRequest):
     s = get_session(sid)
+    USAGE.set(s["usage"])
     if len(s["items"]) >= MAX_ITEMS:
         raise HTTPException(409, f"At most {MAX_ITEMS} items per cook.")
     item = new_item(req.name.strip(), req.preference.strip(), s["language"], time.time())
@@ -545,19 +595,25 @@ async def frame(sid: str, file: UploadFile = File(...)):
     prompt = SYSTEM_PROMPT.format(food=s["food"], language=s["language"], goal_line=goal_line, last_say_line=last_say_line)
 
     try:
+        USAGE.set(s["usage"])
         result = await run_in_threadpool(call_model, prompt, [prev, data])
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(502, f"Model call failed: {type(e).__name__} {getattr(e, 'status_code', '')}".strip())
 
+    if result["pan_visible"] is False and result["state"] != "alert":
+        result["say"] = ""      # the server announces "cannot see the pan" once; no repeated camera complaints
     if result["say"]:
         s["last_say"] = result["say"]
     s["prev"], s["last_call"] = prev, now
 
+    clears = s["away_since"] is not None and (result["person_present"] is True or result["burner_lit"] is False)
+    s["clear_votes"] = s.get("clear_votes", 0) + 1 if clears else 0
     for key in ("pan_visible", "person_present", "burner_lit"):
-        if result[key] is not None:
-            s["facts"][key] = result[key]
+        if result[key] is None or (clears and s["clear_votes"] < 2 and key != "pan_visible"):
+            continue                # one odd reading does not cancel the stove countdown
+        s["facts"][key] = result[key]
 
     notices = []
     if result["pan_visible"] is False:
@@ -583,6 +639,234 @@ def ask(sid: str, req: AskRequest):
         raise
     except Exception as e:
         raise HTTPException(502, f"Model call failed: {type(e).__name__} {getattr(e, 'status_code', '')}".strip())
+
+
+NUMBER_WORDS = {"a": 1, "an": 1, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8, "nine": 9,
+                "ten": 10, "fifteen": 15, "twenty": 20, "thirty": 30, "forty": 40, "sixty": 60}
+TIMER_RE = re.compile(r"\b(?:set (?:a )?timer for|timer for|remind me in|wake me in)\s+([\w-]+)\s*(second|sec|minute|min|hour)s?\b")
+ADD_RE = re.compile(r"^(?:please\s+)?(?:(?:i(?:'m| am)\s+)?adding|add|i added|(?:i(?:'m| am)\s+)?putting in)\s+(.{2,80}?)[.!?\s]*$")
+NO_RE = re.compile(r"^(?:no|nope|nothing|not now|no thanks|no thank you|i(?:'m| am) (?:fine|good)|all good)\b")
+
+
+def parse_timer(text: str):
+    m = TIMER_RE.search((text or "").lower())
+    if not m:
+        return None
+    word, unit = m.groups()
+    n = int(word) if word.isdigit() else NUMBER_WORDS.get(word)
+    if not n:
+        return None
+    secs = n * (3600 if unit == "hour" else 60 if unit.startswith("min") else 1)
+    return secs if 1 <= secs <= 7200 else None
+
+
+def handle_utterance(s: dict, text: str) -> dict:
+    """Route what the cook said: decline, set a timer, add an item, or answer a question about the pan or cooking."""
+    text, lc = (text or "").strip(), s["language_code"]
+    base = {"heard": text, "state": "ok", "say": "", "timer_seconds": None, "item": None}
+    if not text:
+        return {**base, "kind": "empty", "say": t(lc, "voice_fail")}
+    low = text.lower()
+    if NO_RE.match(low):
+        return {**base, "kind": "decline", "say": t(lc, "quiet")}
+    secs = parse_timer(low)
+    if secs:
+        label = f"{secs // 60} min" if secs >= 60 and secs % 60 == 0 else f"{secs} sec"
+        return {**base, "kind": "timer", "timer_seconds": secs, "say": t(lc, "timer_set").format(m=label)}
+    added = ADD_RE.match(low)
+    if added and len(s["items"]) < MAX_ITEMS:
+        item = new_item(added.group(1), "", s["language"], time.time())
+        s["items"].append(item)
+        s["food"] = ", ".join(i["name"] for i in s["items"])
+        return {**base, "kind": "add_item", "say": item["intro"], "item": public(item)}
+    if not s["last"]:
+        return {**base, "kind": "empty", "say": t(lc, "voice_fail")}
+    r = call_model(ASK_PROMPT.format(food=s["food"], language=s["language"], question=text.replace('"', "'")), [s["last"]])
+    return {**base, "kind": "answer", "state": r["state"], "say": r["say"], "timer_seconds": r["timer_seconds"]}
+
+
+class UtteranceRequest(BaseModel):
+    text: str = Field(default="", max_length=300)
+
+
+@app.post("/api/session/{sid}/utterance")
+def utterance(sid: str, req: UtteranceRequest):
+    s = get_session(sid)
+    USAGE.set(s["usage"])
+    try:
+        return handle_utterance(s, req.text)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(502, f"Model call failed: {type(e).__name__} {getattr(e, 'status_code', '')}".strip())
+
+
+@app.get("/api/session/{sid}/usage")
+def usage(sid: str):
+    return usage_view(get_session(sid)["usage"])
+
+
+def _voice_handshake(lang) -> dict:
+    h = {"authorization": {"accessToken": f"Bearer {get_client().api_key}"}, "audioEncoding": "PCM_16KHZ", "model": VOICE_MODEL,
+         "mode": "ENDPOINTING", "partialMode": "CUMULATIVE", "emitAudioProgress": False, "keywords": ["Mpishi"]}
+    if lang != "sw":      # Swahili is not among Meta's listed languages: leave detection automatic
+        h["languageBias"] = ["English"]
+    return h
+
+
+def strip_wake(text: str):
+    """Hands-free: did the sentence start with the wake word 'Mpishi'? Returns (heard, rest of the sentence)."""
+    m = re.match(r"^\W*(?:(?:hey|hi|hello|ok|okay)\W+)?([\w']+)\W*(.*)$", (text or "").strip(), re.S)
+    if not m:
+        return False, ""
+    first = m.group(1).lower()
+    ok = first in ("mpishi", "mpisha", "pishi", "mpeshi", "mpichi") or difflib.SequenceMatcher(None, first, "mpishi").ratio() >= 0.72
+    return (True, m.group(2).strip()) if ok else (False, "")
+
+
+@app.websocket("/ws/voice/{sid}")
+async def voice(ws: WebSocket, sid: str):
+    """Relay the browser's microphone (PCM16, 16 kHz, mono) to Meta's realtime transcription, then act on what was said."""
+    s = SESSIONS.get(sid)
+    code_ok = not ACCESS_CODE or secrets.compare_digest(ws.query_params.get("code", "").encode(), ACCESS_CODE.encode())
+    if not s or not code_ok or websockets is None:
+        await ws.close(code=4401)
+        return
+    await ws.accept()
+    USAGE.set(s["usage"])
+    handshake = _voice_handshake(ws.query_params.get("lang"))
+    sent, tasks = 0, []
+    try:
+        async with websockets.connect(f"{VOICE_URL}?sessionId=stream-{uuid.uuid4()}", open_timeout=10) as up:
+            await up.send(json.dumps(handshake))
+            ack = json.loads(await asyncio.wait_for(up.recv(), 10))
+            if "sessionId" not in ack:
+                await ws.send_json({"type": "error", "message": str(ack.get("message", ack))[:200]})
+                return
+            await ws.send_json({"type": "ready"})
+
+            async def pump_up():
+                nonlocal sent
+                while True:
+                    msg = await ws.receive()
+                    if msg.get("type") == "websocket.disconnect":
+                        return
+                    if msg.get("bytes"):
+                        sent += len(msg["bytes"])
+                        await up.send(msg["bytes"])
+                    elif msg.get("text") == "end":
+                        await up.send(json.dumps({"type": "endStream"}))
+                        return
+
+            async def pump_down():
+                async for raw in up:
+                    if isinstance(raw, bytes):
+                        continue
+                    data = json.loads(raw)
+                    kind = data.get("type")
+                    if kind == "transcript" and data.get("transcript"):
+                        await ws.send_json({"type": "partial", "text": data["transcript"]})
+                    elif kind == "speechComplete":
+                        return data.get("transcript", "")
+                    elif kind == "error":
+                        raise RuntimeError(str(data.get("message", data))[:200])
+                return ""
+
+            tasks = [asyncio.create_task(pump_up()), asyncio.create_task(pump_down())]
+            text = await asyncio.wait_for(tasks[1], VOICE_MAX_SECONDS)
+        s["usage"]["voice_s"] += sent / 32000
+        result = await run_in_threadpool(handle_utterance, s, text)
+        await ws.send_json({"type": "final", **result})
+    except Exception as e:
+        log.error("Voice failed: %s %s", type(e).__name__, str(e)[:200])
+        try:
+            await ws.send_json({"type": "error", "message": type(e).__name__})
+        except Exception:
+            pass
+    finally:
+        for task in tasks:
+            task.cancel()
+        try:
+            await ws.close()
+        except Exception:
+            pass
+
+
+@app.websocket("/ws/listen/{sid}")
+async def listen(ws: WebSocket, sid: str):
+    """Hands-free: keep Meta's realtime transcription open; act only on sentences that start with 'Mpishi'
+    (or that follow a 'window' from the page, e.g. right after a check-in question)."""
+    s = SESSIONS.get(sid)
+    code_ok = not ACCESS_CODE or secrets.compare_digest(ws.query_params.get("code", "").encode(), ACCESS_CODE.encode())
+    if not s or not code_ok or websockets is None:
+        await ws.close(code=4401)
+        return
+    await ws.accept()
+    USAGE.set(s["usage"])
+    awake_until, tasks = 0.0, []
+    try:
+        async with websockets.connect(f"{VOICE_URL}?sessionId=stream-{uuid.uuid4()}", open_timeout=10) as up:
+            await up.send(json.dumps(_voice_handshake(ws.query_params.get("lang"))))
+            ack = json.loads(await asyncio.wait_for(up.recv(), 10))
+            if "sessionId" not in ack:
+                await ws.send_json({"type": "error", "message": str(ack.get("message", ack))[:200]})
+                return
+            await ws.send_json({"type": "ready"})
+
+            async def pump_up():
+                nonlocal awake_until
+                while True:
+                    msg = await ws.receive()
+                    if msg.get("type") == "websocket.disconnect":
+                        return
+                    if msg.get("bytes"):
+                        s["usage"]["voice_s"] += len(msg["bytes"]) / 32000
+                        await up.send(msg["bytes"])
+                    elif msg.get("text") == "window":
+                        awake_until = time.time() + 10
+
+            async def pump_down():
+                nonlocal awake_until
+                async for raw in up:
+                    if isinstance(raw, bytes):
+                        continue
+                    data = json.loads(raw)
+                    if data.get("type") == "error":
+                        raise RuntimeError(str(data.get("message", data))[:200])
+                    if data.get("type") != "speechComplete" or not (data.get("transcript") or "").strip():
+                        continue
+                    heard, rest = strip_wake(data["transcript"])
+                    if heard:
+                        command = rest
+                    elif time.time() < awake_until:
+                        command = data["transcript"].strip()
+                    else:
+                        continue                      # ordinary kitchen talk is ignored
+                    if not command:                   # just "Mpishi": listen for the next sentence
+                        awake_until = time.time() + 10
+                        await ws.send_json({"type": "awake"})
+                        continue
+                    awake_until = 0.0
+                    result = await run_in_threadpool(handle_utterance, s, command)
+                    await ws.send_json({"type": "final", **result})
+
+            tasks = [asyncio.create_task(pump_up()), asyncio.create_task(pump_down())]
+            done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            for d in done:
+                d.result()
+    except Exception as e:
+        log.error("Hands-free failed: %s %s", type(e).__name__, str(e)[:200])
+        try:
+            await ws.send_json({"type": "error", "message": type(e).__name__})
+        except Exception:
+            pass
+    finally:
+        for task in tasks:
+            task.cancel()
+        try:
+            await ws.close()
+        except Exception:
+            pass
 
 
 @app.delete("/api/session/{sid}")

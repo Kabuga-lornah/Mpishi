@@ -1176,6 +1176,12 @@ video{
     scroll-behavior:auto!important;
   }
 }
+.mic{display:flex;align-items:center;justify-content:center;gap:.7rem;width:100%;padding:1.1rem;border-radius:999px;font-size:1.25rem;font-weight:700;border:2px solid currentColor;background:transparent;color:inherit;cursor:pointer}
+.mic.on{background:#e5483b;border-color:#e5483b;color:#fff}
+.mic.on::before{content:"";width:.8rem;height:.8rem;border-radius:50%;background:#fff;animation:micpulse 1s ease-in-out infinite}
+.heard{min-height:1.5rem;margin:.5rem 0 .2rem;opacity:.85;font-style:italic}
+.fine2{font-size:.85rem;opacity:.7;margin:.35rem 0}
+@keyframes micpulse{50%{opacity:.25}}
 </style>
 </head>
 
@@ -1403,10 +1409,11 @@ video{
 
     <div>
 
+      <button id="mic" class="mic" type="button" aria-pressed="false"><span id="micLabel">Tap to talk</span></button>
+      <button id="hands" class="mic" type="button" aria-pressed="false" style="margin-top:.5rem;font-size:1rem"><span id="handsLabel"></span></button>
+      <p id="heard" class="heard" aria-live="polite"></p>
       <div class="row">
-
-        <input
-          id="itemname"
+        <input id="itemname"
           placeholder="Add another item"
           maxlength="200"
           aria-label="Add item"
@@ -1450,10 +1457,9 @@ video{
     </div>
 
 
-    <ul
-      id="log"
-      aria-label="Activity"
-    ></ul>
+    <ul id="log" aria-label="Activity"></ul>
+    <p id="usageLine" class="fine2"></p>
+    <p id="privacyLive" class="fine2"></p>
 
   </div>
 
@@ -1470,12 +1476,12 @@ video{
 <script>
 const UI = {
   en:{
-    codeLabel:"Access code", wrongCode:"Wrong access code.", near:"Someone is near the stove", away:"Nobody near the stove",
-    subtitle:"An extra set of eyes on your stove. Not a smoke alarm.", foodLabel:"What are you cooking? (optional)", foodPlaceholder:"e.g. potato fries in oil", goalLabel:"Tell me when... (optional)", goalPlaceholder:"e.g. the fries are golden", prefLabel:"How do you like it? (optional)", prefPlaceholder:"e.g. steak medium, stew very tender", langLabel:"Language", demoLabel:"Demo mode: safety intervals accelerated", start:"Start watching", planning:"Planning your cook...", add:"Add", planningShort:"Planning...", ask:"Ask", stop:"Stop", addItem:"Add another item, e.g. steamed cabbage", askPlaceholder:"Ask: is it ready yet?", guide:"Cooking guide (estimates; check by hand)", watching:"● Mpishi is watching automatically", privacy:"Your camera is used for the active cooking session. Mpishi does not need a manual “I am leaving” button.", offlineTitle:"MPISHI IS NOT WATCHING", offlineText:"Please check the stove yourself.", startMessage:"Mpishi is watching. Point the camera at the cooking area.", starting:"Starting...", lastCheck:"Last check", cameraSecure:"The camera needs a secure page. Use localhost or an HTTPS link.", cameraBlocked:"Camera access was blocked. Allow camera access and try again.", connection:"I lost the connection. Please check the stove yourself.", timerDone:"Timer done. Check the food.", uncertain:"I am not sure. Please check the food yourself.", after:"after", min:"min", fromSearch:"from web search", fromMemory:"from model knowledge", noGuide:"no guide"
+    codeLabel:"Access code", wrongCode:"Wrong access code.", micTap:"Tap to talk", micListen:"Listening... tap to send", checkin:"Any questions? I can help.", voiceFail:"I could not hear that. Tap the microphone to try again.", noMic:"Microphone blocked. Allow microphone access.", cost:"Session cost", uncertain:"I am not sure. Please check by hand.", handsOn:"Hands-free on: say Mpishi...", handsOff:"Hands-free off", yes:"Yes?", near:"Someone is near the stove", away:"Nobody near the stove",
+    subtitle:"An extra set of eyes on your stove. Not a smoke alarm.", foodLabel:"What are you cooking? (optional)", foodPlaceholder:"e.g. potato fries in oil", goalLabel:"Tell me when... (optional)", goalPlaceholder:"e.g. the fries are golden", prefLabel:"How do you like it? (optional)", prefPlaceholder:"e.g. steak medium, stew very tender", langLabel:"Language", demoLabel:"Demo mode: safety intervals accelerated", start:"Start watching", planning:"Planning your cook...", add:"Add", planningShort:"Planning...", ask:"Ask", stop:"Stop", addItem:"Add another item, e.g. steamed cabbage", askPlaceholder:"Ask: is it ready yet?", guide:"Cooking guide (estimates; check by hand)", watching:"● Mpishi is watching automatically", privacy:"Camera pictures are sent to Meta's Muse models to read the stove. Mpishi keeps only the latest two in memory and does not save them. When hands-free is on, kitchen audio is also streamed to Meta's voice model, and only sentences starting with Mpishi are acted on.", offlineTitle:"MPISHI IS NOT WATCHING", offlineText:"Please check the stove yourself.", startMessage:"Mpishi is watching. Point the camera at the cooking area.", starting:"Starting...", lastCheck:"Last check", cameraSecure:"The camera needs a secure page. Use localhost or an HTTPS link.", cameraBlocked:"Camera access was blocked. Allow camera access and try again.", connection:"I lost the connection. Please check the stove yourself.", timerDone:"Timer done. Check the food.", uncertain:"I am not sure. Please check the food yourself.", after:"after", min:"min", fromSearch:"from web search", fromMemory:"from model knowledge", noGuide:"no guide"
   },
   sw:{
-    codeLabel:"Msimbo wa ufikiaji", wrongCode:"Msimbo si sahihi.", near:"Kuna mtu karibu na jiko", away:"Hakuna mtu karibu na jiko",
-    subtitle:"Macho ya ziada ya kuangalia jiko lako. Si king'ora cha moshi.", foodLabel:"Unapika nini? (hiari)", foodPlaceholder:"mfano viazi vya kukaanga kwa mafuta", goalLabel:"Niambie wakati... (hiari)", goalPlaceholder:"mfano viazi viwe vya rangi ya dhahabu", prefLabel:"Unapenda chakula kiweje? (hiari)", prefPlaceholder:"mfano nyama iwe ya wastani, mchuzi mzito", langLabel:"Lugha", demoLabel:"Hali ya onyesho: vipindi vya tahadhari vimeharakishwa", start:"Anza kuangalia", planning:"Mpishi anapanga upishi wako...", add:"Ongeza", planningShort:"Inapanga...", ask:"Uliza", stop:"Simamisha", addItem:"Ongeza chakula kingine, kwa mfano kabeji ya mvuke", askPlaceholder:"Uliza: kimeiva tayari?", guide:"Mwongozo wa upishi (makadirio; hakikisha mwenyewe)", watching:"● Mpishi anaangalia kiotomatiki", privacy:"Kamera inatumika wakati wa upishi. Mpishi haihitaji kitufe cha kusema “nimeondoka”.", offlineTitle:"MPISHI HAANGALII", offlineText:"Tafadhali angalia jiko mwenyewe.", startMessage:"Mpishi anaangalia. Elekeza kamera kwenye sehemu ya kupikia.", starting:"Inaanza...", lastCheck:"Ukaguzi wa mwisho", cameraSecure:"Kamera inahitaji ukurasa salama. Tumia localhost au kiungo cha HTTPS.", cameraBlocked:"Kamera imezuiwa. Ruhusu matumizi ya kamera kisha ujaribu tena.", connection:"Nimepoteza muunganisho. Tafadhali angalia jiko mwenyewe.", timerDone:"Muda umekwisha. Angalia chakula.", uncertain:"Sina uhakika. Tafadhali angalia chakula mwenyewe.", after:"baada ya", min:"dak", fromSearch:"kutoka utafutaji wa wavuti", fromMemory:"kutoka maarifa ya modeli", noGuide:"hakuna mwongozo"
+    codeLabel:"Msimbo wa ufikiaji", wrongCode:"Msimbo si sahihi.", micTap:"Bonyeza uzungumze", micListen:"Nasikiliza... bonyeza kutuma", checkin:"Una swali lolote? Naweza kusaidia.", voiceFail:"Sikusikia vizuri. Bonyeza kipaza sauti ujaribu tena.", noMic:"Kipaza sauti kimezuiwa. Ruhusu ufikiaji.", cost:"Gharama ya kipindi", uncertain:"Sina uhakika. Tafadhali angalia mwenyewe.", handsOn:"Bila mikono: sema Mpishi...", handsOff:"Bila mikono imezimwa", yes:"Ndiyo?", near:"Kuna mtu karibu na jiko", away:"Hakuna mtu karibu na jiko",
+    subtitle:"Macho ya ziada ya kuangalia jiko lako. Si king'ora cha moshi.", foodLabel:"Unapika nini? (hiari)", foodPlaceholder:"mfano viazi vya kukaanga kwa mafuta", goalLabel:"Niambie wakati... (hiari)", goalPlaceholder:"mfano viazi viwe vya rangi ya dhahabu", prefLabel:"Unapenda chakula kiweje? (hiari)", prefPlaceholder:"mfano nyama iwe ya wastani, mchuzi mzito", langLabel:"Lugha", demoLabel:"Hali ya onyesho: vipindi vya tahadhari vimeharakishwa", start:"Anza kuangalia", planning:"Mpishi anapanga upishi wako...", add:"Ongeza", planningShort:"Inapanga...", ask:"Uliza", stop:"Simamisha", addItem:"Ongeza chakula kingine, kwa mfano kabeji ya mvuke", askPlaceholder:"Uliza: kimeiva tayari?", guide:"Mwongozo wa upishi (makadirio; hakikisha mwenyewe)", watching:"● Mpishi anaangalia kiotomatiki", privacy:"Picha za kamera hutumwa kwa miundo ya Muse ya Meta ili kusoma jiko. Mpishi huhifadhi mbili za mwisho tu kwenye kumbukumbu na haihifadhi chochote. Kipengele cha bila mikono kikiwashwa, sauti ya jikoni pia hutumwa kwa mfumo wa sauti wa Meta, na ni sentensi zinazoanza na Mpishi tu hutekelezwa.", offlineTitle:"MPISHI HAANGALII", offlineText:"Tafadhali angalia jiko mwenyewe.", startMessage:"Mpishi anaangalia. Elekeza kamera kwenye sehemu ya kupikia.", starting:"Inaanza...", lastCheck:"Ukaguzi wa mwisho", cameraSecure:"Kamera inahitaji ukurasa salama. Tumia localhost au kiungo cha HTTPS.", cameraBlocked:"Kamera imezuiwa. Ruhusu matumizi ya kamera kisha ujaribu tena.", connection:"Nimepoteza muunganisho. Tafadhali angalia jiko mwenyewe.", timerDone:"Muda umekwisha. Angalia chakula.", uncertain:"Sina uhakika. Tafadhali angalia chakula mwenyewe.", after:"baada ya", min:"dak", fromSearch:"kutoka utafutaji wa wavuti", fromMemory:"kutoka maarifa ya modeli", noGuide:"hakuna mwongozo"
   }
 };
 
@@ -1485,7 +1491,7 @@ let items=[], timerEnd=null, timerTick=null, lastSaid="", lastSaidAt=0, lang="en
 const $=id=>document.getElementById(id);
 const ui=()=>UI[lang];
 
-function applyLanguage(){
+function applyLanguage(){setTimeout(()=>{if($('micLabel')){setMic(listening);setHands();$('privacyLive').textContent=ui().privacy;}});
   const x=ui();
   document.documentElement.lang=lang==='sw'?'sw':'en';
   $('subtitle').textContent=x.subtitle; $('codeLabel').textContent=x.codeLabel; $('foodLabel').textContent=x.foodLabel; $('food').placeholder=x.foodPlaceholder;
@@ -1496,9 +1502,10 @@ function applyLanguage(){
   $('privacyNote').textContent=x.privacy;
 }
 
-function speak(text){
-  if(!text||!window.speechSynthesis)return;
+function speak(text,onend){
+  if(!text||!window.speechSynthesis){if(onend)onend();return;}
   const u=new SpeechSynthesisUtterance(text); u.lang=lang==='sw'?'sw-KE':'en-KE';
+  if(onend){u.onend=onend;u.onerror=onend;}
   speechSynthesis.cancel(); speechSynthesis.speak(u);
 }
 function show(state,text,note){
@@ -1506,7 +1513,7 @@ function show(state,text,note){
   if(note){const s=document.createElement('small');s.textContent=note;el.appendChild(s);}
 }
 function log(text){const li=document.createElement('li'),t=document.createElement('time'),s=document.createElement('span');t.textContent=new Date().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit',second:'2-digit'});s.textContent=text;li.append(t,s);$('log').prepend(li);}
-function setPresence(p){const el=$('presence');el.textContent=p?ui().near:ui().away;el.className='chip '+(p?'near':'away');}
+function setPresence(p){lastPresent=p;const el=$('presence');el.textContent=p?ui().near:ui().away;el.className='chip '+(p?'near':'away');}
 function announce(r){
   if(!r.say)return;
   const now=Date.now(), repeat=r.say===lastSaid&&now-lastSaidAt<REPEAT_MS;
@@ -1557,6 +1564,99 @@ $('stop').onclick=async()=>{clearInterval(loop);clearInterval(timerTick);clearIn
 document.addEventListener('visibilitychange',async()=>{if(!document.hidden&&sid){try{wake=await navigator.wakeLock?.request('screen');}catch(_){ }}});
 try{code=localStorage.getItem('mpishi_code')||'';$('code').value=code;}catch(_){}
 fetch('/api/health').then(r=>r.json()).then(x=>{if(x.protected)$('codeRow').classList.remove('hidden');}).catch(()=>{});
+/* ---- Voice: Meta Muse Voice Transcribe via the server; the browser recogniser is the fallback (and handles Kiswahili) ---- */
+let lastPresent=null, listening=false, vctx=null, vstream=null, vsock=null, vproc=null, vtimer=null, lastCheckin=Date.now();
+const CHECKIN_MS=()=>demo?45000:240000;
+function setMic(on){listening=on;const b=$('mic');b.classList.toggle('on',on);b.setAttribute('aria-pressed',on);$('micLabel').textContent=on?ui().micListen:ui().micTap;}
+function pcm16(f32,inRate){const r=inRate/16000,n=Math.floor(f32.length/r),out=new Int16Array(n);for(let i=0;i<n;i++){const v=Math.max(-1,Math.min(1,f32[Math.floor(i*r)]));out[i]=v<0?v*32768:v*32767;}return out.buffer;}
+function stopCapture(){clearTimeout(vtimer);try{vproc&&vproc.disconnect();}catch(_){}try{vctx&&vctx.close();}catch(_){}try{vstream&&vstream.getTracks().forEach(t=>t.stop());}catch(_){}vproc=vctx=vstream=null;}
+function closeVoice(){stopCapture();if(vsock){try{vsock.close();}catch(_){}vsock=null;}setMic(false);}
+function endListening(){if(!vsock||vsock.readyState!==1){closeVoice();return;}stopCapture();vsock.send('end');vtimer=setTimeout(closeVoice,8000);}
+function beginCapture(){
+  vctx=new (window.AudioContext||window.webkitAudioContext)({sampleRate:16000});
+  const src=vctx.createMediaStreamSource(vstream),mute=vctx.createGain();mute.gain.value=0;
+  vproc=vctx.createScriptProcessor(4096,1,1);
+  vproc.onaudioprocess=e=>{if(vsock&&vsock.readyState===1)vsock.send(pcm16(e.inputBuffer.getChannelData(0),vctx.sampleRate));};
+  src.connect(vproc);vproc.connect(mute);mute.connect(vctx.destination);
+}
+function voiceResult(m){
+  $('heard').textContent=m.heard?'\u201C'+m.heard+'\u201D':'';
+  const say=m.say||(m.kind==='answer'?ui().uncertain:'');
+  if(say){show(m.state||'ok',say);log(say);speak(say);}
+  if(m.timer_seconds)startTimer(m.timer_seconds);
+  if(m.item){items.push(m.item);renderPlan();}
+  holdUntil=Date.now()+8000;lastCheckin=Date.now();refreshUsage();
+}
+function browserListen(maxMs){
+  const SR=window.SpeechRecognition||window.webkitSpeechRecognition;if(!SR)return false;
+  const r=new SR();r.lang=lang==='sw'?'sw-KE':'en-US';r.interimResults=true;let text='';
+  r.onresult=e=>{text=Array.from(e.results).map(x=>x[0].transcript).join(' ');$('heard').textContent=text;};
+  r.onend=async()=>{setMic(false);if(!text.trim())return;
+    try{voiceResult(await api(`/api/session/${sid}/utterance`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text})}));}catch(e){show('watch',ui().voiceFail);}};
+  r.onerror=()=>setMic(false);
+  try{r.start();setMic(true);setTimeout(()=>{try{r.stop();}catch(_){}},maxMs);return true;}catch(_){return false;}
+}
+async function startListening(maxMs=10000){
+  if(listening||!sid)return;$('heard').textContent='';
+  if(lang==='sw'&&browserListen(maxMs))return;          // Meta lists no Kiswahili, so use the browser recogniser for it
+  setMic(true);
+  try{vstream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true}});}
+  catch(e){setMic(false);show('watch',ui().noMic);return;}
+  const proto=location.protocol==='https:'?'wss':'ws';
+  vsock=new WebSocket(`${proto}://${location.host}/ws/voice/${sid}?lang=${lang}&code=${encodeURIComponent(code)}`);
+  vsock.onmessage=ev=>{const m=JSON.parse(ev.data);
+    if(m.type==='ready')beginCapture();
+    else if(m.type==='partial')$('heard').textContent=m.text;
+    else if(m.type==='final'){voiceResult(m);closeVoice();}
+    else if(m.type==='error'){closeVoice();if(!browserListen(maxMs))show('watch',ui().voiceFail);}};
+  vsock.onclose=()=>{vsock=null;if(listening&&!vproc){setMic(false);if(!$('heard').textContent&&!browserListen(maxMs))show('watch',ui().voiceFail);}};
+  vtimer=setTimeout(endListening,maxMs);
+}
+$('mic').onclick=()=>{if(hf&&hsock&&hsock.readyState===1){hsock.send('window');return;}if(!listening)startListening();else endListening();};
+setInterval(()=>{   // mid-cook check-in: only when the cook is near, nothing is wrong, and nothing is being said
+  if(!sid||listening||speechSynthesis.speaking||lastPresent!==true||Date.now()<holdUntil||$('status').classList.contains('alert')||!$('offline').classList.contains('hidden'))return;
+  if(Date.now()-lastCheckin<CHECKIN_MS())return;lastCheckin=Date.now();
+  speak(ui().checkin,()=>{if(hf&&hsock&&hsock.readyState===1)hsock.send('window');else startListening(8000);});
+},5000);
+async function refreshUsage(){if(!sid)return;try{const u=await api(`/api/session/${sid}/usage`);$('usageLine').textContent=`${ui().cost}: $${u.usd.toFixed(3)}`;}catch(_){}}
+setInterval(refreshUsage,30000);
+/* ---- Hands-free: always-on listening for "Mpishi ..." through Meta's realtime voice model ---- */
+let hf=false, hfOff=false, hsock=null, hctx=null, hproc=null, hstream=null, hretry=0;
+function setHands(){const b=$('hands');b.classList.toggle('on',hf);b.setAttribute('aria-pressed',hf);$('handsLabel').textContent=hf?ui().handsOn:ui().handsOff;}
+function stopHandsCapture(){try{hproc&&hproc.disconnect();}catch(_){}try{hctx&&hctx.close();}catch(_){}hproc=hctx=null;}
+function stopHandsFree(){hf=false;if(hsock){try{hsock.close();}catch(_){}hsock=null;}stopHandsCapture();try{hstream&&hstream.getTracks().forEach(t=>t.stop());}catch(_){}hstream=null;setHands();}
+function beginHandsCapture(){
+  hctx=new (window.AudioContext||window.webkitAudioContext)({sampleRate:16000});
+  const src=hctx.createMediaStreamSource(hstream),mute=hctx.createGain();mute.gain.value=0;
+  hproc=hctx.createScriptProcessor(4096,1,1);
+  hproc.onaudioprocess=e=>{if(!hsock||hsock.readyState!==1)return;const f=e.inputBuffer.getChannelData(0);
+    hsock.send(speechSynthesis.speaking?new Int16Array(Math.floor(f.length*16000/hctx.sampleRate)).buffer:pcm16(f,hctx.sampleRate));};   // silence while Mpishi talks, so it never hears itself
+  src.connect(hproc);hproc.connect(mute);mute.connect(hctx.destination);
+}
+function openListen(){
+  const proto=location.protocol==='https:'?'wss':'ws';
+  hsock=new WebSocket(`${proto}://${location.host}/ws/listen/${sid}?lang=${lang}&code=${encodeURIComponent(code)}`);
+  hsock.onmessage=ev=>{const m=JSON.parse(ev.data);
+    if(m.type==='ready'){hretry=0;beginHandsCapture();}
+    else if(m.type==='awake')speak(ui().yes);
+    else if(m.type==='final')voiceResult(m);};
+  hsock.onclose=()=>{hsock=null;stopHandsCapture();if(!hf)return;
+    if(hretry<5){hretry++;setTimeout(()=>{if(hf&&sid)openListen();},1500*hretry);}else{hfOff=true;stopHandsFree();show('watch',ui().voiceFail);}};
+}
+async function startHandsFree(){
+  if(hf||!sid)return;hf=true;setHands();
+  try{hstream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true,autoGainControl:true}});}
+  catch(e){hfOff=true;hf=false;setHands();show('watch',ui().noMic);return;}
+  openListen();
+}
+$('hands').onclick=()=>{if(hf){hfOff=true;stopHandsFree();}else{hfOff=false;startHandsFree();}};
+setInterval(()=>{if(sid&&!hf&&!hfOff)startHandsFree();},1500);   // starts by itself with the session; the button turns it off
+$('stop').addEventListener('click',()=>{   // a finished session leaves nothing behind
+  stopHandsFree();hfOff=false;closeVoice();items=[];renderPlan();
+  $('log').innerHTML='';$('heard').textContent='';$('usageLine').textContent='';$('timer').textContent='';
+  ['food','goal','pref','itemname','q'].forEach(id=>{const e=$(id);if(e)e.value='';});
+  lastPresent=null;$('presence').className='chip hidden';lastCheckin=Date.now();
+});
 applyLanguage();
 </script>
 

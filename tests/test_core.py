@@ -3,7 +3,8 @@ from types import SimpleNamespace
 from PIL import Image
 import main as app_main
 from main import (parse_reply, parse_plan, frame_changed, due_messages, _output_text, make_plan,
-                  MESSAGES, UNATTENDED_STEPS, SYSTEM_PROMPT, PLAN_PROMPT)
+                  MESSAGES, UNATTENDED_STEPS, SYSTEM_PROMPT, PLAN_PROMPT,
+                  parse_timer, handle_utterance, new_usage, _add_usage, USAGE, usage_view, strip_wake)
 
 
 def jpeg(color):
@@ -148,3 +149,49 @@ def test_make_plan_uses_search_then_falls_back_to_memory():
         assert make_plan("boiled eggs", "", "English")["source"] == "memory"
     finally:
         app_main._grounded_text, app_main._chat = saved
+
+def test_parse_timer():
+    assert parse_timer("Set a timer for 5 minutes") == 300 and parse_timer("remind me in ten min") == 600
+    assert parse_timer("timer for 30 seconds") == 30 and parse_timer("set a timer for an hour") == 3600
+    assert parse_timer("how long will the rice take") is None and parse_timer("") is None
+
+
+def test_voice_commands_are_routed():
+    saved = (app_main.call_model, app_main.new_item)
+    try:
+        app_main.call_model = lambda prompt, imgs: {"state": "ok", "say": "About 10 minutes (estimate).", "timer_seconds": None, "goal_met": False}
+        app_main.new_item = lambda name, pref, lang, now: {"name": name, "started": now, "plan_idx": 0, "intro": "Guide.", "checkpoints": [], "source": "web"}
+        s = {"language_code": "en", "language": "English", "items": [], "food": "eggs", "last": b"frame"}
+        assert handle_utterance(s, "No thanks.")["kind"] == "decline"
+        r = handle_utterance(s, "Set a timer for 5 minutes")
+        assert r["kind"] == "timer" and r["timer_seconds"] == 300
+        r = handle_utterance(s, "Add cabbage")
+        assert r["kind"] == "add_item" and r["item"]["name"] == "cabbage" and s["items"][0]["name"] == "cabbage" and s["food"] == "cabbage"
+        r = handle_utterance(s, "How long will the rice take?")
+        assert r["kind"] == "answer" and r["say"].startswith("About 10")
+        assert handle_utterance(s, "")["kind"] == "empty"
+        s["last"] = None
+        assert handle_utterance(s, "is it ready")["kind"] == "empty"
+        assert handle_utterance({**s, "language_code": "sw"}, "no")["say"] == MESSAGES["sw"]["quiet"]
+    finally:
+        app_main.call_model, app_main.new_item = saved
+
+
+def test_usage_cost_is_tracked_per_session():
+    u = new_usage(); USAGE.set(u)
+    _add_usage(SimpleNamespace(usage=SimpleNamespace(prompt_tokens=1_000_000, completion_tokens=100_000)), "muse-spark-1.3")
+    _add_usage(SimpleNamespace(usage=SimpleNamespace(input_tokens=1_000_000, output_tokens=0)), "muse-wonder-1.0")
+    _add_usage(SimpleNamespace(), "muse-spark-1.3")                      # no usage block: ignored
+    assert u["calls"] == 2 and abs(u["usd"] - (1.25 + 0.425 + 4.0)) < 1e-9
+    u["voice_s"] = 3600
+    assert abs(usage_view(u)["usd"] - (5.675 + 0.18)) < 1e-6
+    USAGE.set(None)
+    _add_usage(SimpleNamespace(usage=SimpleNamespace(input_tokens=5, output_tokens=5)), "muse-spark-1.3")   # no session: ignored
+
+
+def test_wake_word_is_required_and_forgiving():
+    assert strip_wake("Mpishi, add cabbage") == (True, "add cabbage")
+    assert strip_wake("hey Mishi set a timer for 5 minutes") == (True, "set a timer for 5 minutes")
+    assert strip_wake("Pishi") == (True, "")
+    assert strip_wake("we need more onions") == (False, "") and strip_wake("hey, add cabbage") == (False, "")
+    assert strip_wake("") == (False, "")
