@@ -23,6 +23,7 @@ try:
 except ImportError:
     pass
 
+import httpx  # import eagerly: a lazy import inside a threadpool thread races openai's own httpx import
 import openai
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile, WebSocket
 from fastapi.concurrency import run_in_threadpool
@@ -52,8 +53,13 @@ MAX_CALLS_PER_SESSION = int(os.getenv("MPISHI_MAX_CALLS", "400"))
 SESSION_TTL_SECONDS = 4 * 3600
 MAX_ITEMS = 8
 # Real-world escalation: stove on and nobody near for 5, 10, 20 and 30 minutes. Demo mode divides these by DEMO_SPEED.
-UNATTENDED_STEPS = [(300, "watch"), (600, "watch"), (1200, "alert"), (1800, "alert")]
+UNATTENDED_STEPS = [(300, "alert"), (600, "alert"), (1200, "alert"), (1800, "alert")]   # a lit stove nobody watches is always serious
 DEMO_SPEED = float(os.getenv("MPISHI_DEMO_SPEED", "20"))
+SAM_ON = os.getenv("MPISHI_SAM", "1") != "0"
+SAM_PROMPTS = tuple(p.strip() for p in os.getenv("MPISHI_SAM_PROMPTS", "person,pot,flame").split(",") if p.strip())
+SAM_MIN_CONF = 0.5
+SAM_USD_PER_IMAGE = 2.50 / 1000
+BOX_RE = re.compile(r"<\|box;x1=([\d.]+);y1=([\d.]+);x2=([\d.]+);y2=([\d.]+);w=([\d.]+);h=([\d.]+)(?:;c=([\d.eE+\-]+))?\|>")
 REPEAT_SECONDS = 60      # an alert nobody acknowledges is repeated this often (divided by the demo speed)
 MAX_REPEATS = 4
 QUIET = {
@@ -93,6 +99,7 @@ Definitions:
 Rules:
 - Stay SILENT ("") by default. NEVER describe the cook, their hands, their movements or what they are doing. NEVER narrate.
 - Speak only when the cook needs to know or do something about the food/stove.
+- A lit burner with no pan, or a pan left on a lit burner with nobody near, is a safety problem: use state="alert" and a firm, serious sentence that starts with "Warning:" and tells the cook what to do (for example "Warning: the burner is on with no pan. Turn it off now.").
 - Alert examples: visible smoke, visible burning, boil-over, flame outside the burner, or a clearly dangerous visible condition.
 - Do NOT claim internal temperature, internal doneness, or facts the camera cannot verify.
 - If you cannot tell, use state="unsure" and say="".
@@ -142,10 +149,10 @@ MESSAGES = {
         "cleared": "Alert cleared. Stove monitoring continues.",
         "acked": "Thank you. I will keep watching.",
         "repeat": "Reminder:",
-        "away_300": "The stove appears unattended. Please check the kitchen.",
-        "away_600": "The stove is still on and nobody appears to be near it. Please check the stove.",
-        "away_1200": "Please check the stove now. It appears to have been unattended for a while.",
-        "away_1800": "Urgent: the stove still appears unattended. Please check it now.",
+        "away_300": "Warning: the stove is on and nobody is near it. Come back to the kitchen now.",
+        "away_600": "Warning: the stove has been left on for several minutes with nobody watching. Go to the stove now.",
+        "away_1200": "Danger: the stove has been on and unattended for a long time. Go and check it right now. Turn it off if you are not cooking.",
+        "away_1800": "URGENT: the stove is still on and unattended. This is a fire risk. Go to it now and turn it off.",
         "watching": "Mpishi is watching. All quiet.",
         "watching_away": "Mpishi is watching the stove automatically.",
         "start": "Mpishi is watching. Point the camera at the cooking area.",
@@ -196,10 +203,10 @@ MESSAGES = {
         "cleared": "Tahadhari imeondolewa. Naendelea kuangalia jiko.",
         "acked": "Asante. Nitaendelea kuangalia.",
         "repeat": "Kumbusho:",
-        "away_300": "Inaonekana jiko halina mtu anayelichunga. Tafadhali angalia jikoni.",
-        "away_600": "Jiko bado linawaka na hakuna mtu anayeonekana kuwa karibu. Tafadhali angalia jiko.",
-        "away_1200": "Tafadhali angalia jiko sasa. Inaonekana limeachwa bila mtu kwa muda.",
-        "away_1800": "Tahadhari: jiko bado linaonekana kuachwa bila mtu. Tafadhali angalia sasa.",
+        "away_300": "Onyo: jiko linawaka na hakuna mtu karibu. Rudi jikoni sasa.",
+        "away_600": "Onyo: jiko limeachwa likiwaka kwa dakika kadhaa bila mtu. Nenda kwenye jiko sasa.",
+        "away_1200": "Hatari: jiko limewaka bila mtu kwa muda mrefu. Nenda ulikague sasa hivi. Lizime kama hupiki.",
+        "away_1800": "DHARURA: jiko bado linawaka bila mtu. Kuna hatari ya moto. Nenda ukalizime sasa.",
         "watching": "Mpishi anaangalia. Kila kitu kiko sawa.",
         "watching_away": "Mpishi anaendelea kulinda jiko kiotomatiki.",
         "start": "Mpishi anaangalia. Elekeza kamera kwenye sehemu ya kupikia.",
@@ -242,7 +249,7 @@ def t(lang_code: str, key: str) -> str:
 
 
 def new_usage() -> dict:
-    return {"calls": 0, "tokens_in": 0, "tokens_out": 0, "usd": 0.0, "voice_s": 0.0}
+    return {"calls": 0, "tokens_in": 0, "tokens_out": 0, "usd": 0.0, "voice_s": 0.0, "sam_calls": 0}
 
 
 def _add_usage(resp, model: str) -> None:
@@ -261,7 +268,8 @@ def _add_usage(resp, model: str) -> None:
 
 def usage_view(u: dict) -> dict:
     return {"calls": u["calls"], "tokens_in": u["tokens_in"], "tokens_out": u["tokens_out"],
-            "voice_s": round(u["voice_s"], 1), "usd": round(u["usd"] + u["voice_s"] / 3600 * VOICE_USD_PER_HOUR, 4)}
+            "voice_s": round(u["voice_s"], 1), "sam_calls": u.get("sam_calls", 0),
+            "usd": round(u["usd"] + u["voice_s"] / 3600 * VOICE_USD_PER_HOUR + u.get("sam_calls", 0) * SAM_USD_PER_IMAGE, 4)}
 
 
 def get_client() -> OpenAI:
@@ -437,6 +445,57 @@ def valid_jpeg(data: bytes) -> bool:
         return True
     except Exception:
         return False
+
+
+def parse_sam(text) -> list:
+    """Boxes from SAM's text output, as fractions of the image (x1, y1, x2, y2) plus confidence c."""
+    out = []
+    for m in BOX_RE.finditer(text or ""):
+        x1, y1, x2, y2, w, h = (float(v) for v in m.groups()[:6])
+        if w > 0 and h > 0:
+            out.append({"x1": x1 / w, "y1": y1 / h, "x2": x2 / w, "y2": y2 / h, "c": float(m.group(7)) if m.group(7) else 1.0})
+    return out
+
+
+def sam_detect(jpeg: bytes, prompt: str) -> list:
+    """Ask Meta's SAM 3.1 where `prompt` (for example 'person' or 'pot') is in one photo."""
+    url = "data:image/jpeg;base64," + base64.b64encode(jpeg).decode()
+    payload = {"model": "sam-3.1", "stream": True, "metadata": {"mask_encoding": "lossless", "include_confidence": "true"},
+               "input": [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": prompt}, {"type": "input_image", "image_url": url}]}]}
+    headers = {"Authorization": f"Bearer {get_client().api_key}", "Content-Type": "application/json", "Accept": "text/event-stream"}
+    text = ""
+    with httpx.stream("POST", f"{BASE_URL}/responses", headers=headers, json=payload, timeout=30) as r:
+        if r.status_code != 200:
+            raise RuntimeError(f"SAM HTTP {r.status_code}")
+        for raw in r.iter_lines():
+            if not raw.startswith("data: ") or raw[6:] == "[DONE]":
+                continue
+            try:
+                event = json.loads(raw[6:])
+            except ValueError:
+                continue
+            if event.get("type") == "response.output_text.done":      # the same text repeats in later events; read it once
+                text = event.get("text") or text
+    return parse_sam(text)
+
+
+def apply_sam(s: dict, result: dict, outcomes: list) -> dict:
+    """SAM supplies hard facts (is a person in view, is a pot in view) with boxes; the language model keeps burner and context."""
+    boxes, ok = {}, 0
+    for prompt, out in zip(SAM_PROMPTS, outcomes):
+        if isinstance(out, Exception):
+            log.error("SAM failed: %s %s", type(out).__name__, str(out)[:120])
+            continue
+        ok += 1
+        s["usage"]["sam_calls"] = s["usage"].get("sam_calls", 0) + 1
+        boxes[prompt] = [b for b in out if b["c"] >= SAM_MIN_CONF]
+    if "person" in boxes:
+        result["person_present"] = bool(boxes["person"])
+    if boxes.get("flame"):
+        result["burner_lit"] = True           # a confident flame box confirms a lit burner; its absence never overrules the model
+    if boxes.get("pot"):
+        result["pan_visible"] = True          # SAM can confirm a pot; it never overrules the model into "not visible"
+    return {"ok": ok > 0 and ok == len(SAM_PROMPTS), "boxes": boxes}
 
 
 def get_session(sid: str) -> dict:
@@ -677,13 +736,15 @@ async def frame(sid: str, file: UploadFile = File(...)):
     last_say_line = f'Your previous message was: "{last}".' if last else "You have not spoken yet."
     prompt = SYSTEM_PROMPT.format(food=s["food"], language=s["language"], goal_line=goal_line, last_say_line=last_say_line)
 
-    try:
-        USAGE.set(s["usage"])
-        result = await run_in_threadpool(call_model, prompt, [prev, data])
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(502, f"Model call failed: {type(e).__name__} {getattr(e, 'status_code', '')}".strip())
+    USAGE.set(s["usage"])
+    jobs = [run_in_threadpool(call_model, prompt, [prev, data])] + ([run_in_threadpool(sam_detect, data, p) for p in SAM_PROMPTS] if SAM_ON else [])
+    done = await asyncio.gather(*jobs, return_exceptions=True)      # Muse Spark and SAM run side by side
+    result = done[0]
+    if isinstance(result, HTTPException):
+        raise result
+    if isinstance(result, Exception):
+        raise HTTPException(502, f"Model call failed: {type(result).__name__} {getattr(result, 'status_code', '')}".strip())
+    sam = apply_sam(s, result, done[1:]) if SAM_ON else {"ok": False, "boxes": {}}
 
     if result["pan_visible"] is False and result["state"] != "alert":
         result["say"] = ""      # the server announces "cannot see the pan" once; no repeated camera complaints
@@ -715,7 +776,7 @@ async def frame(sid: str, file: UploadFile = File(...)):
             if a["kind"] == "model_alert" and a["cleared_at"] is None:
                 a["cleared_at"] = now
     notices.extend(due_messages(s, now))
-    return {"status": "analysed", "diff": round(diff, 1), **result, "notices": notices}
+    return {"status": "analysed", "diff": round(diff, 1), **result, "sam": sam, "notices": notices}
 
 
 @app.post("/api/session/{sid}/ask")

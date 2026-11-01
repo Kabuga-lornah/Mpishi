@@ -4,7 +4,7 @@ from PIL import Image
 import main as app_main
 from main import (parse_reply, parse_plan, frame_changed, due_messages, _output_text, make_plan,
                   MESSAGES, UNATTENDED_STEPS, SYSTEM_PROMPT, PLAN_PROMPT,
-                  parse_timer, handle_utterance, new_usage, _add_usage, USAGE, usage_view, strip_wake, acknowledge)
+                  parse_timer, handle_utterance, new_usage, _add_usage, USAGE, usage_view, strip_wake, acknowledge, parse_sam, apply_sam)
 
 
 def jpeg(color):
@@ -81,8 +81,9 @@ def test_unattended_stove_reminders_escalate_and_reset():
     assert due_messages(s, 100) == []
     assert due_messages(s, 100 + 200) == []                        # 3 minutes away: still quiet
     first = due_messages(s, 100 + 301)
-    assert len(first) == 1 and first[0]["state"] == "watch" and first[0]["say"] == MESSAGES["en"]["away_300"]
-    assert due_messages(s, 100 + 400) == []
+    assert len(first) == 1 and first[0]["state"] == "alert" and first[0]["say"] == MESSAGES["en"]["away_300"]
+    assert due_messages(s, 100 + 330) == []                        # too soon to repeat
+    assert [n["kind"] for n in due_messages(s, 100 + 400)] == ["repeat"]   # an alert nobody acknowledged is repeated
     assert due_messages(s, 100 + 601)[0]["say"] == MESSAGES["en"]["away_600"]
     assert due_messages(s, 100 + 1201)[0]["state"] == "alert"
     s["facts"]["person_present"] = True
@@ -229,3 +230,39 @@ def test_checkpoint_notices_explain_themselves():
     s = sess([item("eggs", [{"at_minutes": 3, "say": "Lower the heat"}])])
     n = due_messages(s, 200)[0]
     assert n["kind"] == "checkpoint" and "eggs" in n["why"][0]
+
+
+SAM_SAMPLE = ("<0f>0<|box;x1=0;y1=278;x2=453;y2=1279;w=577;h=1280;c=0.976608157157898|>"
+              "<|mask;x=0;y=0;c=0.976608157157898;data=480,640,abc|>\n")
+
+
+def test_parse_sam_reads_the_real_output_format():
+    (b,) = parse_sam(SAM_SAMPLE)
+    assert abs(b["x2"] - 453 / 577) < 1e-9 and abs(b["y1"] - 278 / 1280) < 1e-9 and abs(b["c"] - 0.9766) < 1e-3
+    assert parse_sam("") == [] and parse_sam(None) == [] and parse_sam("<|box;broken|>") == []
+    assert len(parse_sam(SAM_SAMPLE + SAM_SAMPLE.replace("<0f>0", "<0f>1"))) == 2
+
+
+def test_sam_gives_hard_facts_and_never_forces_pot_invisible():
+    s = {"usage": new_usage()}
+    seen = [{"x1": 0, "y1": 0, "x2": 1, "y2": 1, "c": 0.9}]
+    weak = [{"x1": 0, "y1": 0, "x2": 1, "y2": 1, "c": 0.2}]
+    r = {"person_present": True, "pan_visible": False}
+    info = apply_sam(s, r, [[], seen, []])                      # no person, a pot
+    assert r["person_present"] is False and r["pan_visible"] is True and info["ok"] and s["usage"]["sam_calls"] == 3
+    r = {"person_present": False, "pan_visible": True}
+    apply_sam(s, r, [weak, [], []])                             # weak person, no pot: low confidence ignored, pan stays visible
+    assert r["person_present"] is False and r["pan_visible"] is True
+    r = {"person_present": True, "pan_visible": True}
+    info = apply_sam(s, r, [RuntimeError("boom")] * 3)      # SAM down: the model's facts stand
+    assert r == {"person_present": True, "pan_visible": True} and info["ok"] is False and info["boxes"] == {}
+
+def test_sam_flame_confirms_a_lit_burner_but_never_turns_it_off():
+    s = {"usage": new_usage()}
+    seen = [{"x1": 0, "y1": 0, "x2": 1, "y2": 1, "c": 0.9}]
+    r = {"person_present": True, "pan_visible": True, "burner_lit": None}
+    apply_sam(s, r, [[], [], seen])
+    assert r["burner_lit"] is True
+    r = {"person_present": True, "pan_visible": True, "burner_lit": True}
+    apply_sam(s, r, [[], [], []])
+    assert r["burner_lit"] is True

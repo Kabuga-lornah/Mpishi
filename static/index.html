@@ -1186,6 +1186,7 @@ video{
 .why h2{font-size:1.05rem;margin:0 0 .3rem}.whysay{font-weight:700;margin:.2rem 0 .5rem}
 #whyList{margin:0 0 .7rem;padding-left:1.1rem}#whyList li{margin:.15rem 0}
 #ack{width:auto;padding:.7rem 1.4rem;margin:0}
+.overlay{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}
 </style>
 </head>
 
@@ -1350,11 +1351,8 @@ video{
 
     <div class="screen">
 
-      <video
-        id="cam"
-        playsinline
-        muted
-      ></video>
+      <video id="cam" playsinline muted></video>
+      <canvas id="overlay" class="overlay"></canvas>
 
 
       <span
@@ -1483,11 +1481,11 @@ video{
 const UI = {
   en:{
     codeLabel:"Access code", wrongCode:"Wrong access code.", micTap:"Tap to talk", micListen:"Listening... tap to send", checkin:"Any questions? I can help.", voiceFail:"I could not hear that. Tap the microphone to try again.", noMic:"Microphone blocked. Allow microphone access.", cost:"Session cost", uncertain:"I am not sure. Please check by hand.", handsOn:"Hands-free on: say Mpishi...", handsOff:"Hands-free off", yes:"Yes?", whyTitle:"Why I'm alerting", ack:"I heard you", acked:"Thank you. I'll keep watching.", replayLabel:"Replay a recording instead of the camera (optional)", replayBadge:"Replay of recorded footage", near:"Someone is near the stove", away:"Nobody near the stove",
-    subtitle:"An extra set of eyes on your stove. Not a smoke alarm.", foodLabel:"What are you cooking? (optional)", foodPlaceholder:"e.g. potato fries in oil", goalLabel:"Tell me when... (optional)", goalPlaceholder:"e.g. the fries are golden", prefLabel:"How do you like it? (optional)", prefPlaceholder:"e.g. steak medium, stew very tender", langLabel:"Language", demoLabel:"Demo mode: safety intervals accelerated", start:"Start watching", planning:"Planning your cook...", add:"Add", planningShort:"Planning...", ask:"Ask", stop:"Stop", addItem:"Add another item, e.g. steamed cabbage", askPlaceholder:"Ask: is it ready yet?", guide:"Cooking guide (estimates; check by hand)", watching:"● Mpishi is watching automatically", privacy:"Camera pictures are sent to Meta's Muse models to read the stove. Mpishi keeps only the latest two in memory and does not save them. When hands-free is on, kitchen audio is also streamed to Meta's voice model, and only sentences starting with Mpishi are acted on.", offlineTitle:"MPISHI IS NOT WATCHING", offlineText:"Please check the stove yourself.", startMessage:"Mpishi is watching. Point the camera at the cooking area.", starting:"Starting...", lastCheck:"Last check", cameraSecure:"The camera needs a secure page. Use localhost or an HTTPS link.", cameraBlocked:"Camera access was blocked. Allow camera access and try again.", connection:"I lost the connection. Please check the stove yourself.", timerDone:"Timer done. Check the food.", uncertain:"I am not sure. Please check the food yourself.", after:"after", min:"min", fromSearch:"from web search", fromMemory:"from model knowledge", noGuide:"no guide"
+    subtitle:"An extra set of eyes on your stove. Not a smoke alarm.", foodLabel:"What are you cooking? (optional)", foodPlaceholder:"e.g. potato fries in oil", goalLabel:"Tell me when... (optional)", goalPlaceholder:"e.g. the fries are golden", prefLabel:"How do you like it? (optional)", prefPlaceholder:"e.g. steak medium, stew very tender", langLabel:"Language", demoLabel:"Demo mode: safety intervals accelerated", start:"Start watching", planning:"Planning your cook...", add:"Add", planningShort:"Planning...", ask:"Ask", stop:"Stop", addItem:"Add another item, e.g. steamed cabbage", askPlaceholder:"Ask: is it ready yet?", guide:"Cooking guide (estimates; check by hand)", watching:"● Mpishi is watching automatically", privacy:"Camera pictures are sent to Meta's Muse and SAM models to read the stove. Mpishi keeps only the latest two in memory and does not save them. When hands-free is on, kitchen audio is also streamed to Meta's voice model, and only sentences starting with Mpishi are acted on.", offlineTitle:"MPISHI IS NOT WATCHING", offlineText:"Please check the stove yourself.", startMessage:"Mpishi is watching. Point the camera at the cooking area.", starting:"Starting...", lastCheck:"Last check", cameraSecure:"The camera needs a secure page. Use localhost or an HTTPS link.", cameraBlocked:"Camera access was blocked. Allow camera access and try again.", connection:"I lost the connection. Please check the stove yourself.", timerDone:"Timer done. Check the food.", uncertain:"I am not sure. Please check the food yourself.", after:"after", min:"min", fromSearch:"from web search", fromMemory:"from model knowledge", noGuide:"no guide"
   },
   sw:{
     codeLabel:"Msimbo wa ufikiaji", wrongCode:"Msimbo si sahihi.", micTap:"Bonyeza uzungumze", micListen:"Nasikiliza... bonyeza kutuma", checkin:"Una swali lolote? Naweza kusaidia.", voiceFail:"Sikusikia vizuri. Bonyeza kipaza sauti ujaribu tena.", noMic:"Kipaza sauti kimezuiwa. Ruhusu ufikiaji.", cost:"Gharama ya kipindi", uncertain:"Sina uhakika. Tafadhali angalia mwenyewe.", handsOn:"Bila mikono: sema Mpishi...", handsOff:"Bila mikono imezimwa", yes:"Ndiyo?", whyTitle:"Kwa nini ninatahadharisha", ack:"Nimekusikia", acked:"Asante. Nitaendelea kuangalia.", replayLabel:"Cheza rekodi badala ya kamera (si lazima)", replayBadge:"Rekodi iliyochezwa tena", near:"Kuna mtu karibu na jiko", away:"Hakuna mtu karibu na jiko",
-    subtitle:"Macho ya ziada ya kuangalia jiko lako. Si king'ora cha moshi.", foodLabel:"Unapika nini? (hiari)", foodPlaceholder:"mfano viazi vya kukaanga kwa mafuta", goalLabel:"Niambie wakati... (hiari)", goalPlaceholder:"mfano viazi viwe vya rangi ya dhahabu", prefLabel:"Unapenda chakula kiweje? (hiari)", prefPlaceholder:"mfano nyama iwe ya wastani, mchuzi mzito", langLabel:"Lugha", demoLabel:"Hali ya onyesho: vipindi vya tahadhari vimeharakishwa", start:"Anza kuangalia", planning:"Mpishi anapanga upishi wako...", add:"Ongeza", planningShort:"Inapanga...", ask:"Uliza", stop:"Simamisha", addItem:"Ongeza chakula kingine, kwa mfano kabeji ya mvuke", askPlaceholder:"Uliza: kimeiva tayari?", guide:"Mwongozo wa upishi (makadirio; hakikisha mwenyewe)", watching:"● Mpishi anaangalia kiotomatiki", privacy:"Picha za kamera hutumwa kwa miundo ya Muse ya Meta ili kusoma jiko. Mpishi huhifadhi mbili za mwisho tu kwenye kumbukumbu na haihifadhi chochote. Kipengele cha bila mikono kikiwashwa, sauti ya jikoni pia hutumwa kwa mfumo wa sauti wa Meta, na ni sentensi zinazoanza na Mpishi tu hutekelezwa.", offlineTitle:"MPISHI HAANGALII", offlineText:"Tafadhali angalia jiko mwenyewe.", startMessage:"Mpishi anaangalia. Elekeza kamera kwenye sehemu ya kupikia.", starting:"Inaanza...", lastCheck:"Ukaguzi wa mwisho", cameraSecure:"Kamera inahitaji ukurasa salama. Tumia localhost au kiungo cha HTTPS.", cameraBlocked:"Kamera imezuiwa. Ruhusu matumizi ya kamera kisha ujaribu tena.", connection:"Nimepoteza muunganisho. Tafadhali angalia jiko mwenyewe.", timerDone:"Muda umekwisha. Angalia chakula.", uncertain:"Sina uhakika. Tafadhali angalia chakula mwenyewe.", after:"baada ya", min:"dak", fromSearch:"kutoka utafutaji wa wavuti", fromMemory:"kutoka maarifa ya modeli", noGuide:"hakuna mwongozo"
+    subtitle:"Macho ya ziada ya kuangalia jiko lako. Si king'ora cha moshi.", foodLabel:"Unapika nini? (hiari)", foodPlaceholder:"mfano viazi vya kukaanga kwa mafuta", goalLabel:"Niambie wakati... (hiari)", goalPlaceholder:"mfano viazi viwe vya rangi ya dhahabu", prefLabel:"Unapenda chakula kiweje? (hiari)", prefPlaceholder:"mfano nyama iwe ya wastani, mchuzi mzito", langLabel:"Lugha", demoLabel:"Hali ya onyesho: vipindi vya tahadhari vimeharakishwa", start:"Anza kuangalia", planning:"Mpishi anapanga upishi wako...", add:"Ongeza", planningShort:"Inapanga...", ask:"Uliza", stop:"Simamisha", addItem:"Ongeza chakula kingine, kwa mfano kabeji ya mvuke", askPlaceholder:"Uliza: kimeiva tayari?", guide:"Mwongozo wa upishi (makadirio; hakikisha mwenyewe)", watching:"● Mpishi anaangalia kiotomatiki", privacy:"Picha za kamera hutumwa kwa miundo ya Muse na SAM ya Meta ili kusoma jiko. Mpishi huhifadhi mbili za mwisho tu kwenye kumbukumbu na haihifadhi chochote. Kipengele cha bila mikono kikiwashwa, sauti ya jikoni pia hutumwa kwa mfumo wa sauti wa Meta, na ni sentensi zinazoanza na Mpishi tu hutekelezwa.", offlineTitle:"MPISHI HAANGALII", offlineText:"Tafadhali angalia jiko mwenyewe.", startMessage:"Mpishi anaangalia. Elekeza kamera kwenye sehemu ya kupikia.", starting:"Inaanza...", lastCheck:"Ukaguzi wa mwisho", cameraSecure:"Kamera inahitaji ukurasa salama. Tumia localhost au kiungo cha HTTPS.", cameraBlocked:"Kamera imezuiwa. Ruhusu matumizi ya kamera kisha ujaribu tena.", connection:"Nimepoteza muunganisho. Tafadhali angalia jiko mwenyewe.", timerDone:"Muda umekwisha. Angalia chakula.", uncertain:"Sina uhakika. Tafadhali angalia chakula mwenyewe.", after:"baada ya", min:"dak", fromSearch:"kutoka utafutaji wa wavuti", fromMemory:"kutoka maarifa ya modeli", noGuide:"hakuna mwongozo"
   }
 };
 
@@ -1676,7 +1674,17 @@ function showWhy(n){
   if(!['unattended','model_alert','repeat'].includes(n.kind))whyTimer=setTimeout(hideWhy,n.kind==='cleared'?12000:20000);
 }
 function handleNotices(notes){notes.forEach(n=>{if(n.why&&n.why.length){showWhy(n);vibrate(n.state==='alert'?[300,150,300]:[120]);}});}
-const _api=api;api=async function(path,opts){const r=await _api(path,opts);if(r&&Array.isArray(r.notices)&&r.notices.length)handleNotices(r.notices);return r;};
+function drawBoxes(sam){   // boxes from SAM 3.1, drawn over the live video
+  const cv=$('overlay'),v=$('cam'),r=cv.getBoundingClientRect();cv.width=r.width;cv.height=r.height;
+  const g=cv.getContext('2d');g.clearRect(0,0,cv.width,cv.height);if(!sam||!v.videoWidth)return;
+  const k=(getComputedStyle(v).objectFit==='cover'?Math.max:Math.min)(r.width/v.videoWidth,r.height/v.videoHeight),
+        ox=(r.width-v.videoWidth*k)/2,oy=(r.height-v.videoHeight*k)/2,colors={person:'#4ade80',pot:'#60a5fa',flame:'#fb923c'};
+  Object.entries(sam.boxes||{}).forEach(([name,list])=>list.forEach(b=>{
+    const x=ox+b.x1*v.videoWidth*k,y=oy+b.y1*v.videoHeight*k,w=(b.x2-b.x1)*v.videoWidth*k,h=(b.y2-b.y1)*v.videoHeight*k;
+    g.lineWidth=3;g.strokeStyle=colors[name]||'#fff';g.strokeRect(x,y,w,h);
+    g.fillStyle=colors[name]||'#fff';g.font='bold 14px system-ui';g.fillText(name+' '+Math.round(b.c*100)+'%',x+4,Math.max(14,y-6));}));
+}
+const _api=api;api=async function(path,opts){const r=await _api(path,opts);if(r&&Array.isArray(r.notices)&&r.notices.length)handleNotices(r.notices);if(r&&r.sam)drawBoxes(r.sam);return r;};
 const _vr=voiceResult;voiceResult=function(m){_vr(m);if(m.kind==='ack'){$('ack').classList.add('hidden');$('whySay').textContent=m.say||ui().acked;}};
 $('ack').onclick=async()=>{
   try{await api(`/api/session/${sid}/ack`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({alert_id:openAlert||''})});
@@ -1690,7 +1698,7 @@ if(_gum)navigator.mediaDevices.getUserMedia=async c=>{   // a recording stands i
     $('replaybadge').classList.remove('hidden');return (v.captureStream||v.mozCaptureStream).call(v);}
   if(c&&c.video)$('replaybadge').classList.add('hidden');
   return _gum(c);};
-$('stop').addEventListener('click',()=>{if(replayVid){replayVid.pause();replayVid=null;}hideWhy();$('replaybadge').classList.add('hidden');});
+$('stop').addEventListener('click',()=>{if(replayVid){replayVid.pause();replayVid=null;}hideWhy();drawBoxes(null);$('replaybadge').classList.add('hidden');});
 applyLanguage();
 </script>
 
