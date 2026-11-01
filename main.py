@@ -54,6 +54,8 @@ MAX_ITEMS = 8
 # Real-world escalation: stove on and nobody near for 5, 10, 20 and 30 minutes. Demo mode divides these by DEMO_SPEED.
 UNATTENDED_STEPS = [(300, "watch"), (600, "watch"), (1200, "alert"), (1800, "alert")]
 DEMO_SPEED = float(os.getenv("MPISHI_DEMO_SPEED", "20"))
+REPEAT_SECONDS = 60      # an alert nobody acknowledges is repeated this often (divided by the demo speed)
+MAX_REPEATS = 4
 QUIET = {
     "state": "ok",
     "say": "",
@@ -129,6 +131,17 @@ MESSAGES = {
         "quiet": "Okay. I will stay quiet and keep watching.",
         "voice_fail": "I could not hear that. Tap the microphone to try again.",
         "timer_set": "Timer set for {m}.",
+        "why_burner": "A burner appears to be lit.",
+        "why_pan": "A pot or pan is in view.",
+        "why_nobody": "Nobody is detected near the stove.",
+        "why_elapsed": "Unattended for {t}.",
+        "why_plan": "Reminder from the cooking guide for {item}.",
+        "why_nopan": "No pan or stove was visible in the last two checks.",
+        "why_model": "Muse Spark flagged this from the camera view.",
+        "why_back": "Someone is near the stove again.",
+        "cleared": "Alert cleared. Stove monitoring continues.",
+        "acked": "Thank you. I will keep watching.",
+        "repeat": "Reminder:",
         "away_300": "The stove appears unattended. Please check the kitchen.",
         "away_600": "The stove is still on and nobody appears to be near it. Please check the stove.",
         "away_1200": "Please check the stove now. It appears to have been unattended for a while.",
@@ -172,6 +185,17 @@ MESSAGES = {
         "quiet": "Sawa. Nitakaa kimya na kuendelea kuangalia.",
         "voice_fail": "Sikusikia vizuri. Bonyeza kipaza sauti ujaribu tena.",
         "timer_set": "Kipima muda kimewekwa: {m}.",
+        "why_burner": "Jiko linaonekana kuwaka.",
+        "why_pan": "Sufuria au chungu kinaonekana.",
+        "why_nobody": "Hakuna mtu aliyeonekana karibu na jiko.",
+        "why_elapsed": "Bila mtu kwa {t}.",
+        "why_plan": "Kumbusho kutoka kwa mwongozo wa kupika wa {item}.",
+        "why_nopan": "Sufuria au jiko halikuonekana katika ukaguzi mbili za mwisho.",
+        "why_model": "Muse Spark imeona hili kupitia kamera.",
+        "why_back": "Mtu yuko karibu na jiko tena.",
+        "cleared": "Tahadhari imeondolewa. Naendelea kuangalia jiko.",
+        "acked": "Asante. Nitaendelea kuangalia.",
+        "repeat": "Kumbusho:",
         "away_300": "Inaonekana jiko halina mtu anayelichunga. Tafadhali angalia jikoni.",
         "away_600": "Jiko bado linawaka na hakuna mtu anayeonekana kuwa karibu. Tafadhali angalia jiko.",
         "away_1200": "Tafadhali angalia jiko sasa. Inaonekana limeachwa bila mtu kwa muda.",
@@ -429,9 +453,49 @@ def human_time(secs: float, lang_code: str) -> str:
     return f"{secs // 60} {t(lang_code, 'minutes_word')}"
 
 
+def fmt_elapsed(seconds: float) -> str:
+    return f"{int(seconds) // 60}:{int(seconds) % 60:02d}"
+
+
+def _why(s: dict, *extra) -> list:
+    """Plain-language reasons behind an alert, taken from the last known facts."""
+    lc, f = s["language_code"], s["facts"]
+    reasons = []
+    if f.get("burner_lit") is True:
+        reasons.append(t(lc, "why_burner"))
+    if f.get("pan_visible") is True:
+        reasons.append(t(lc, "why_pan"))
+    if f.get("person_present") is False:
+        reasons.append(t(lc, "why_nobody"))
+    return reasons + [x for x in extra if x]
+
+
+def _notice(a: dict) -> dict:
+    return {"state": a["state"], "kind": a["kind"], "alert_id": a["id"], "say": a["say"], "why": a["why"]}
+
+
+def raise_alert(s: dict, now: float, kind: str, state: str, say: str, why: list) -> dict:
+    """Alert lifecycle: issued -> (repeated while unacknowledged) -> acknowledged -> cleared when the cause goes away."""
+    alert = {"id": f"a{len(s['alerts']) + 1}", "kind": kind, "state": state, "say": say, "why": why, "issued": now,
+             "last_issue": now, "repeats": 0, "acked_at": None, "cleared_at": None}
+    s["alerts"].append(alert)
+    return _notice(alert)
+
+
+def acknowledge(s: dict, now: float, alert_id=None) -> int:
+    """The cook says they heard it. This stops the nagging, but the stove is still watched and the alert is not 'safe'."""
+    n = 0
+    for a in s.get("alerts", []):
+        if a["cleared_at"] is None and a["acked_at"] is None and (alert_id is None or a["id"] == alert_id):
+            a["acked_at"] = now
+            n += 1
+    return n
+
+
 def due_messages(s: dict, now: float) -> list:
     """Drive reminders from the clock and last known vision facts, not from manual user input."""
     out = []
+    s.setdefault("alerts", [])
     speed = s["speed"]
 
     # Food-specific cooking checkpoints.
@@ -440,7 +504,8 @@ def due_messages(s: dict, now: float) -> list:
         points = item["checkpoints"]
         while item["plan_idx"] < len(points) and elapsed >= points[item["plan_idx"]]["at_minutes"] * 60:
             point = points[item["plan_idx"]]
-            out.append({"state": "watch", "say": f'{item["name"]}: {point["say"]}'})
+            out.append({"state": "watch", "kind": "checkpoint", "say": f'{item["name"]}: {point["say"]}',
+                        "why": [t(s["language_code"], "why_plan").format(item=item["name"])]})
             item["plan_idx"] += 1
 
     # Automatic unattended-stove detection. No button is required.
@@ -462,11 +527,28 @@ def due_messages(s: dict, now: float) -> list:
             if away < limit:
                 break
             key = f"away_{real_seconds}"
-            out.append({"state": state, "say": t(s["language_code"], key)})
+            out.append(raise_alert(s, now, "unattended", state, t(s["language_code"], key),
+                                   _why(s, t(s["language_code"], "why_elapsed").format(t=fmt_elapsed(away)))))
             s["away_level"] += 1
     else:
         s["away_since"] = None
         s["away_level"] = 0
+        opened = [a for a in s["alerts"] if a["kind"] == "unattended" and a["cleared_at"] is None]
+        for a in opened:
+            a["cleared_at"] = now
+        if opened:
+            out.append({"state": "ok", "kind": "cleared", "alert_id": opened[-1]["id"], "say": t(s["language_code"], "cleared"),
+                        "why": [t(s["language_code"], "why_back")]})
+
+    latest = {}
+    for a in s["alerts"]:
+        latest[a["kind"]] = a          # only the newest alert of each kind is repeated
+    for a in latest.values():
+        if (a["kind"] in ("unattended", "model_alert") and a["state"] == "alert" and a["acked_at"] is None
+                and a["cleared_at"] is None and a["repeats"] < MAX_REPEATS and now - a["last_issue"] >= REPEAT_SECONDS / speed):
+            a["repeats"] += 1
+            a["last_issue"] = now
+            out.append({**_notice(a), "kind": "repeat", "say": t(s["language_code"], "repeat") + " " + a["say"]})
 
     return out
 
@@ -546,6 +628,7 @@ def start(req: StartRequest):
         "no_pan": 0,
         "speed": DEMO_SPEED if req.demo else 1.0,
         "usage": usage,
+        "alerts": [],
     }
     return {"session_id": sid, "items": [public(i) for i in items], "language": lang_code}
 
@@ -619,10 +702,18 @@ async def frame(sid: str, file: UploadFile = File(...)):
     if result["pan_visible"] is False:
         s["no_pan"] += 1
         if s["no_pan"] == 2:
-            notices.append({"state": "watch", "say": t(s["language_code"], "no_pan")})
+            notices.append({"state": "watch", "kind": "no_pan", "say": t(s["language_code"], "no_pan"),
+                            "why": [t(s["language_code"], "why_nopan")]})
     elif result["pan_visible"] is True:
         s["no_pan"] = 0
 
+    if result["state"] == "alert" and result["say"]:      # model alerts join the same lifecycle (why, acknowledge, repeat)
+        notices.append(raise_alert(s, now, "model_alert", "alert", result["say"], _why(s, t(s["language_code"], "why_model"))))
+        result["say"] = ""
+    elif result["state"] == "ok":
+        for a in s["alerts"]:
+            if a["kind"] == "model_alert" and a["cleared_at"] is None:
+                a["cleared_at"] = now
     notices.extend(due_messages(s, now))
     return {"status": "analysed", "diff": round(diff, 1), **result, "notices": notices}
 
@@ -645,6 +736,7 @@ NUMBER_WORDS = {"a": 1, "an": 1, "one": 1, "two": 2, "three": 3, "four": 4, "fiv
                 "ten": 10, "fifteen": 15, "twenty": 20, "thirty": 30, "forty": 40, "sixty": 60}
 TIMER_RE = re.compile(r"\b(?:set (?:a )?timer for|timer for|remind me in|wake me in)\s+([\w-]+)\s*(second|sec|minute|min|hour)s?\b")
 ADD_RE = re.compile(r"^(?:please\s+)?(?:(?:i(?:'m| am)\s+)?adding|add|i added|(?:i(?:'m| am)\s+)?putting in)\s+(.{2,80}?)[.!?\s]*$")
+ACK_RE = re.compile(r"^(?:ok(?:ay)?|got it|i hear you|i heard(?: you)?|i(?:'m| am) (?:coming|on my way|back|on it)|on my way|thank(?:s| you))\b")
 NO_RE = re.compile(r"^(?:no|nope|nothing|not now|no thanks|no thank you|i(?:'m| am) (?:fine|good)|all good)\b")
 
 
@@ -667,6 +759,9 @@ def handle_utterance(s: dict, text: str) -> dict:
     if not text:
         return {**base, "kind": "empty", "say": t(lc, "voice_fail")}
     low = text.lower()
+    if ACK_RE.match(low) and any(a["cleared_at"] is None and a["acked_at"] is None for a in s.get("alerts", [])):
+        acknowledge(s, time.time())
+        return {**base, "kind": "ack", "say": t(lc, "acked")}
     if NO_RE.match(low):
         return {**base, "kind": "decline", "say": t(lc, "quiet")}
     secs = parse_timer(low)
@@ -699,6 +794,17 @@ def utterance(sid: str, req: UtteranceRequest):
         raise
     except Exception as e:
         raise HTTPException(502, f"Model call failed: {type(e).__name__} {getattr(e, 'status_code', '')}".strip())
+
+
+class AckRequest(BaseModel):
+    alert_id: str = ""
+
+
+@app.post("/api/session/{sid}/ack")
+def ack(sid: str, req: AckRequest):
+    s = get_session(sid)
+    n = acknowledge(s, time.time(), req.alert_id or None)
+    return {"acknowledged": n, "say": t(s["language_code"], "acked")}
 
 
 @app.get("/api/session/{sid}/usage")

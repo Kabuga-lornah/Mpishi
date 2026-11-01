@@ -4,7 +4,7 @@ from PIL import Image
 import main as app_main
 from main import (parse_reply, parse_plan, frame_changed, due_messages, _output_text, make_plan,
                   MESSAGES, UNATTENDED_STEPS, SYSTEM_PROMPT, PLAN_PROMPT,
-                  parse_timer, handle_utterance, new_usage, _add_usage, USAGE, usage_view, strip_wake)
+                  parse_timer, handle_utterance, new_usage, _add_usage, USAGE, usage_view, strip_wake, acknowledge)
 
 
 def jpeg(color):
@@ -86,7 +86,8 @@ def test_unattended_stove_reminders_escalate_and_reset():
     assert due_messages(s, 100 + 601)[0]["say"] == MESSAGES["en"]["away_600"]
     assert due_messages(s, 100 + 1201)[0]["state"] == "alert"
     s["facts"]["person_present"] = True
-    assert due_messages(s, 100 + 1300) == [] and s["away_level"] == 0
+    cleared = due_messages(s, 100 + 1300)
+    assert [n["kind"] for n in cleared] == ["cleared"] and s["away_level"] == 0
 
 
 def test_demo_mode_compresses_time_but_keeps_the_same_logic():
@@ -195,3 +196,36 @@ def test_wake_word_is_required_and_forgiving():
     assert strip_wake("Pishi") == (True, "")
     assert strip_wake("we need more onions") == (False, "") and strip_wake("hey, add cabbage") == (False, "")
     assert strip_wake("") == (False, "")
+
+
+def test_alert_lifecycle_issue_explain_repeat_acknowledge_clear():
+    s = sess(facts=dict(AWAY))
+    due_messages(s, 100)
+    for dt in (301, 601, 1201):
+        out = due_messages(s, 100 + dt)
+    alert = out[0]
+    assert alert["state"] == "alert" and alert["kind"] == "unattended" and alert["alert_id"]
+    assert "Nobody is detected near the stove." in alert["why"] and "Unattended for 20:01." in alert["why"], alert["why"]
+    assert due_messages(s, 100 + 1201 + 30) == []                                   # too soon to repeat
+    nag = due_messages(s, 100 + 1201 + 61)
+    assert [n["kind"] for n in nag] == ["repeat"] and nag[0]["say"].startswith("Reminder:")
+    assert acknowledge(s, 100 + 1300) >= 1
+    assert due_messages(s, 100 + 1201 + 200) == [] and s["away_since"] is not None  # acknowledged, but still being watched
+    s["facts"]["person_present"] = True
+    cleared = due_messages(s, 100 + 1201 + 260)
+    assert [n["kind"] for n in cleared] == ["cleared"] and all(a["cleared_at"] for a in s["alerts"])
+
+
+def test_okay_acknowledges_only_when_something_is_open():
+    s = {"language_code": "en", "language": "English", "items": [], "food": "x", "last": None, "alerts": []}
+    assert handle_utterance(s, "okay")["kind"] != "ack"
+    s["alerts"].append({"id": "a1", "kind": "unattended", "state": "alert", "say": "x", "why": [], "issued": 0,
+                        "last_issue": 0, "repeats": 0, "acked_at": None, "cleared_at": None})
+    r = handle_utterance(s, "Okay, I'm coming")
+    assert r["kind"] == "ack" and s["alerts"][0]["acked_at"] is not None
+
+
+def test_checkpoint_notices_explain_themselves():
+    s = sess([item("eggs", [{"at_minutes": 3, "say": "Lower the heat"}])])
+    n = due_messages(s, 200)[0]
+    assert n["kind"] == "checkpoint" and "eggs" in n["why"][0]
