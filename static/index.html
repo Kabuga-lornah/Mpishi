@@ -1684,7 +1684,14 @@ function drawBoxes(sam){   // boxes from SAM 3.1, drawn over the live video
     g.lineWidth=3;g.strokeStyle=colors[name]||'#fff';g.strokeRect(x,y,w,h);
     g.fillStyle=colors[name]||'#fff';g.font='bold 14px system-ui';g.fillText(name+' '+Math.round(b.c*100)+'%',x+4,Math.max(14,y-6));}));
 }
+let lastBoxes={};
+const _draw=drawBoxes;drawBoxes=function(sam){if(!sam){lastBoxes={};return _draw(null);}Object.assign(lastBoxes,sam.boxes||{});_draw({boxes:lastBoxes});};
 const _api=api;api=async function(path,opts){const r=await _api(path,opts);if(r&&Array.isArray(r.notices)&&r.notices.length)handleNotices(r.notices);if(r&&r.sam)drawBoxes(r.sam);return r;};
+// Fast presence check: a small photo every ~2.5 s, SAM "person" only, so the box follows the cook and the unattended alert clears within seconds.
+let presBusy=0;   // up to 2 presence checks in flight, so a new photo goes out before the last answer is back
+function grabSmall(){const v=$('cam');if(!v.videoWidth)return null;const c=document.createElement('canvas'),s=384/Math.max(v.videoWidth,v.videoHeight);c.width=Math.round(v.videoWidth*s);c.height=Math.round(v.videoHeight*s);c.getContext('2d').drawImage(v,0,0,c.width,c.height);return new Promise(res=>c.toBlob(res,'image/jpeg',0.6));}
+async function presenceTick(){if(presBusy>=2||!sid)return;presBusy++;try{const blob=await grabSmall();if(!blob)return;const fd=new FormData();fd.append('file',blob,'p.jpg');const r=await api(`/api/session/${sid}/presence`,{method:'POST',body:fd});if(r&&r.ok){if(r.person)setPresence(true);else if(lastBoxes.person){lastBoxes.person=[];drawBoxes({boxes:{}});}}}catch(_){}finally{presBusy--;}}
+setInterval(presenceTick,1500);
 const _vr=voiceResult;voiceResult=function(m){_vr(m);if(m.kind==='ack'){$('ack').classList.add('hidden');$('whySay').textContent=m.say||ui().acked;}};
 $('ack').onclick=async()=>{
   try{await api(`/api/session/${sid}/ack`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({alert_id:openAlert||''})});

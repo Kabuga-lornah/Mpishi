@@ -58,6 +58,13 @@ DEMO_SPEED = float(os.getenv("MPISHI_DEMO_SPEED", "20"))
 SAM_ON = os.getenv("MPISHI_SAM", "1") != "0"
 SAM_PROMPTS = tuple(p.strip() for p in os.getenv("MPISHI_SAM_PROMPTS", "person,pot,flame").split(",") if p.strip())
 SAM_MIN_CONF = 0.5
+SAM_MIN_CONF_BY = {"flame": 0.25}      # flames are small and score low; a 0.5 cut-off hid them
+SAM_FACT_MAX_AGE = 15.0            # seconds a detector reading may be used as a "fact" for the language model
+PRESENCE_CLEAR_CONF = 0.6          # a person seen this surely by the fast presence check clears the unattended alert at once
+PRESENCE_GRACE = 6.0               # seconds after a sighting during which a slower "nobody there" answer is ignored
+PRESENCE_ABSENT_SECONDS = 3.0      # nobody seen for this long (and in 2 checks) before the fast check declares the cook away
+SAM_QUERY = {"flame": os.getenv("MPISHI_FLAME_QUERY", "flame")}      # the words sent to SAM for each label; try "fire" or "gas flame" with sam_probe.py
+SAM_STRONG_PERSON = 0.9      # a person this surely seen clears an unattended-stove alert at once
 SAM_USD_PER_IMAGE = 2.50 / 1000
 BOX_RE = re.compile(r"<\|box;x1=([\d.]+);y1=([\d.]+);x2=([\d.]+);y2=([\d.]+);w=([\d.]+);h=([\d.]+)(?:;c=([\d.eE+\-]+))?\|>")
 REPEAT_SECONDS = 60      # an alert nobody acknowledges is repeated this often (divided by the demo speed)
@@ -461,10 +468,10 @@ def sam_detect(jpeg: bytes, prompt: str) -> list:
     """Ask Meta's SAM 3.1 where `prompt` (for example 'person' or 'pot') is in one photo."""
     url = "data:image/jpeg;base64," + base64.b64encode(jpeg).decode()
     payload = {"model": "sam-3.1", "stream": True, "metadata": {"mask_encoding": "lossless", "include_confidence": "true"},
-               "input": [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": prompt}, {"type": "input_image", "image_url": url}]}]}
+               "input": [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": SAM_QUERY.get(prompt, prompt)}, {"type": "input_image", "image_url": url}]}]}
     headers = {"Authorization": f"Bearer {get_client().api_key}", "Content-Type": "application/json", "Accept": "text/event-stream"}
     text = ""
-    with httpx.stream("POST", f"{BASE_URL}/responses", headers=headers, json=payload, timeout=30) as r:
+    with httpx.stream("POST", f"{BASE_URL}/responses", headers=headers, json=payload, timeout=15) as r:
         if r.status_code != 200:
             raise RuntimeError(f"SAM HTTP {r.status_code}")
         for raw in r.iter_lines():
@@ -488,14 +495,38 @@ def apply_sam(s: dict, result: dict, outcomes: list) -> dict:
             continue
         ok += 1
         s["usage"]["sam_calls"] = s["usage"].get("sam_calls", 0) + 1
-        boxes[prompt] = [b for b in out if b["c"] >= SAM_MIN_CONF]
+        boxes[prompt] = [b for b in out if b["c"] >= SAM_MIN_CONF_BY.get(prompt, SAM_MIN_CONF)]
+    seen = s.setdefault("sam_seen", {})
+    for name, found in boxes.items():
+        seen[name] = (time.time(), found)
     if "person" in boxes:
         result["person_present"] = bool(boxes["person"])
     if boxes.get("flame"):
         result["burner_lit"] = True           # a confident flame box confirms a lit burner; its absence never overrules the model
     if boxes.get("pot"):
         result["pan_visible"] = True          # SAM can confirm a pot; it never overrules the model into "not visible"
-    return {"ok": ok > 0 and ok == len(SAM_PROMPTS), "boxes": boxes}
+    strong_person = any(b["c"] >= SAM_STRONG_PERSON for b in boxes.get("person", []))
+    return {"ok": ok > 0 and ok == len(SAM_PROMPTS), "boxes": boxes, "strong_person": strong_person}
+
+
+def sam_facts_line(seen: dict, now: float = None) -> str:
+    """Tell the language model what the detector measured recently, so its wording cannot contradict the picture.
+    `seen` maps a SAM prompt to (timestamp, boxes); readings older than SAM_FACT_MAX_AGE are left out."""
+    now = time.time() if now is None else now
+    parts = []
+    for name in SAM_PROMPTS:
+        if name not in seen or now - seen[name][0] > SAM_FACT_MAX_AGE:
+            continue
+        found = seen[name][1]
+        best = f" ({max(b['c'] for b in found):.0%})" if found else ""
+        if name == "flame":
+            parts.append(f"flame: detected{best}" if found else "flame: not detected (the detector often misses flames; judge burner_lit yourself)")
+        else:
+            parts.append(f"{name}: {len(found)}{best}" if found else f"{name}: none")
+    if not parts:
+        return ""
+    return ("\nTrusted detector results for the CURRENT photo (treat as facts; your \"say\" must agree): " + "; ".join(parts) +
+            ". Never say nobody is near if a person is detected; never say there is no pan if a pot is detected.")
 
 
 def get_session(sid: str) -> dict:
@@ -692,6 +723,49 @@ def start(req: StartRequest):
     return {"session_id": sid, "items": [public(i) for i in items], "language": lang_code}
 
 
+def presence_update(s: dict, people: list, taken: float, now: float) -> bool:
+    """Fast presence rules. Returns True when the stove facts changed and the alerts should be re-evaluated.
+    A sighting counts at once; an absence needs two checks over PRESENCE_ABSENT_SECONDS, so one missed detection never starts a countdown."""
+    if people:
+        s["person_seen_at"] = taken
+        s["pres_absent_since"], s["pres_absent_n"] = None, 0
+        if max(b["c"] for b in people) >= PRESENCE_CLEAR_CONF:
+            s["facts"]["person_present"] = True
+            s["clear_votes"] = 2
+            return True
+        return False
+    if s.get("pres_absent_since") is None:
+        s["pres_absent_since"], s["pres_absent_n"] = taken, 0
+    s["pres_absent_n"] = s.get("pres_absent_n", 0) + 1
+    if (s["pres_absent_n"] >= 2 and taken - s["pres_absent_since"] >= PRESENCE_ABSENT_SECONDS
+            and taken - s.get("person_seen_at", 0) >= PRESENCE_ABSENT_SECONDS and s["facts"].get("person_present") is not False):
+        s["facts"]["person_present"] = False
+        return True
+    return False
+
+
+@app.post("/api/session/{sid}/presence")
+async def presence(sid: str, file: UploadFile = File(...)):
+    """Fast path: one small photo, one SAM 'person' call. Shows the box and shuts the unattended alert at once."""
+    s = get_session(sid)
+    data = await file.read()
+    if len(data) > MAX_FRAME_BYTES or not valid_jpeg(data):
+        raise HTTPException(400, "Frame must be a JPEG under 3 MB.")
+    if not SAM_ON:
+        return {"ok": False, "notices": []}
+    taken = time.time()
+    try:
+        out = await run_in_threadpool(sam_detect, data, "person")
+    except Exception as e:
+        log.error("SAM failed: %s %s", type(e).__name__, str(e)[:120])
+        return {"ok": False, "notices": []}
+    s["usage"]["sam_calls"] = s["usage"].get("sam_calls", 0) + 1
+    people = [b for b in out if b["c"] >= SAM_MIN_CONF]
+    s.setdefault("sam_seen", {})["person"] = (time.time(), people)
+    notices = due_messages(s, time.time()) if presence_update(s, people, taken, time.time()) else []
+    return {"ok": True, "person": bool(people), "sam": {"boxes": {"person": people}}, "notices": notices}
+
+
 @app.post("/api/session/{sid}/items")
 def add_item(sid: str, req: ItemRequest):
     s = get_session(sid)
@@ -737,6 +811,7 @@ async def frame(sid: str, file: UploadFile = File(...)):
     prompt = SYSTEM_PROMPT.format(food=s["food"], language=s["language"], goal_line=goal_line, last_say_line=last_say_line)
 
     USAGE.set(s["usage"])
+    prompt += sam_facts_line(s.get("sam_seen", {}))      # latest detector readings (from the fast presence check), no waiting
     jobs = [run_in_threadpool(call_model, prompt, [prev, data])] + ([run_in_threadpool(sam_detect, data, p) for p in SAM_PROMPTS] if SAM_ON else [])
     done = await asyncio.gather(*jobs, return_exceptions=True)      # Muse Spark and SAM run side by side
     result = done[0]
@@ -744,7 +819,12 @@ async def frame(sid: str, file: UploadFile = File(...)):
         raise result
     if isinstance(result, Exception):
         raise HTTPException(502, f"Model call failed: {type(result).__name__} {getattr(result, 'status_code', '')}".strip())
-    sam = apply_sam(s, result, done[1:]) if SAM_ON else {"ok": False, "boxes": {}}
+    sam = apply_sam(s, result, done[1:]) if SAM_ON else {"ok": False, "boxes": {}, "strong_person": False}
+    if result["person_present"] is False and s.get("person_seen_at", 0) > now - PRESENCE_GRACE:
+        result["person_present"] = True      # this answer is stale: the fast check saw the cook after this photo was taken
+        if result["state"] == "alert":
+            result["state"], result["say"] = "ok", ""
+        sam["strong_person"] = True
 
     if result["pan_visible"] is False and result["state"] != "alert":
         result["say"] = ""      # the server announces "cannot see the pan" once; no repeated camera complaints
@@ -754,6 +834,8 @@ async def frame(sid: str, file: UploadFile = File(...)):
 
     clears = s["away_since"] is not None and (result["person_present"] is True or result["burner_lit"] is False)
     s["clear_votes"] = s.get("clear_votes", 0) + 1 if clears else 0
+    if clears and sam["strong_person"]:
+        s["clear_votes"] = 2                # a confident person detection clears immediately
     for key in ("pan_visible", "person_present", "burner_lit"):
         if result[key] is None or (clears and s["clear_votes"] < 2 and key != "pan_visible"):
             continue                # one odd reading does not cancel the stove countdown

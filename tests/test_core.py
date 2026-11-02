@@ -266,3 +266,47 @@ def test_sam_flame_confirms_a_lit_burner_but_never_turns_it_off():
     r = {"person_present": True, "pan_visible": True, "burner_lit": True}
     apply_sam(s, r, [[], [], []])
     assert r["burner_lit"] is True
+
+def test_sam_facts_line_reports_measurements_and_skips_stale():
+    import time
+    from main import sam_facts_line
+    now = time.time()
+    line = sam_facts_line({"person": (now, []), "pot": (now, [{"c": 0.91}]), "flame": (now - 99, [{"c": 0.9}])}, now)
+    assert "person: none" in line and "pot: 1 (91%)" in line and "flame" not in line
+    assert "Never say nobody is near" in line
+    assert sam_facts_line({}, now) == ""
+    assert "flame: not detected" in sam_facts_line({"flame": (now, [])}, now)
+
+
+def test_flame_uses_a_lower_confidence_cutoff():
+    s = {"usage": new_usage()}
+    weak = [{"x1": 0, "y1": 0, "x2": 1, "y2": 1, "c": 0.3}]
+    info = apply_sam(s, {"person_present": True, "pan_visible": True, "burner_lit": None}, [[], [], weak])
+    assert info["boxes"]["flame"] == weak
+    info = apply_sam(s, {"person_present": True, "pan_visible": True, "burner_lit": None}, [weak, [], []])
+    assert info["boxes"]["person"] == []
+
+
+def test_apply_sam_flags_strong_person():
+    s = {"usage": new_usage()}
+    r = {"person_present": False, "pan_visible": None, "burner_lit": None}
+    assert apply_sam(s, dict(r), [[{"c": 0.95}], [], []])["strong_person"] is True
+    assert apply_sam(s, dict(r), [[{"c": 0.7}], [], []])["strong_person"] is False
+
+
+def test_presence_sighting_clears_at_once_but_absence_needs_two_checks_over_time():
+    from main import presence_update
+    s = {"facts": {"person_present": False}, "clear_votes": 0}
+    seen = [{"c": 0.7}]
+    assert presence_update(s, seen, 100.0, 100.0) is True and s["facts"]["person_present"] is True and s["clear_votes"] == 2
+    assert presence_update(s, [], 110.0, 110.0) is False       # one miss: nothing changes
+    assert presence_update(s, [], 111.0, 111.0) is False       # two misses but only 1 s apart
+    assert s["facts"]["person_present"] is True
+    assert presence_update(s, [], 113.5, 113.5) is True and s["facts"]["person_present"] is False
+    assert presence_update(s, [{"c": 0.55}], 114.0, 114.0) is False     # weak sighting: no clear, but the absence streak resets
+    assert s["pres_absent_since"] is None and s["facts"]["person_present"] is False
+
+
+def test_flame_query_can_be_overridden():
+    import main
+    assert main.SAM_QUERY.get("flame") and main.SAM_QUERY.get("person", "person") == "person"
