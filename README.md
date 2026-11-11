@@ -214,8 +214,5 @@ The tests cover the response parsers, the unattended-stove timeline and escalati
 ## Author
 
 **Lornah**, Nairobi, Kenya. Full-stack developer (back-end focus) and cybersecurity analyst.
-Contact: *add your Discord handle or LinkedIn here.*
+Contact:www.linkedin.com/in/lornahkabuga | lornahkabuga - Discord
 
-## License
-
-*Add a license here (for example MIT) before others reuse the code.*
